@@ -24,6 +24,19 @@ non-POST methods 405 (`Allow: POST`), oversized POST bodies 413, and unknown mod
 404. Non-POST requests to the exact `/v1/videos/sync` path return 405 before any
 body-size check, even for oversized bodies. Other endpoints retain their existing
 body-size limits.
+
+Video admission uses the control-plane route context for the caller's org and
+configured priority. As on JSON inference requests, configured-priority callers
+are exempt from per-key RPM limits and overload shedding; this is an admission
+exemption only, not a multipart priority injection. Other callers use the shared
+per-key (OAuth subject for access tokens), per-model minute counters and receive
+429 with a rounded-up `Retry-After` at the configured hard limit. Since video has
+no trusted queue-priority transport, the soft limit also returns 429 instead of
+silently skipping demotion or rewriting the form as JSON. Failed route-context
+lookups grant no priority exemption. Client-supplied multipart `priority` parts
+(including files) return 400, even for configured-priority callers. Admitted
+multipart bodies and their Content-Type and Authorization remain unchanged.
+
 This selects a configured model; it does not validate video capability (the model
 configuration has no endpoint allowlist or capability field). Rejecting configured
 but video-incompatible models is a follow-up, not implemented in this draft.

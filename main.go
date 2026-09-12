@@ -989,6 +989,41 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 			return
 		}
 
+		if r.URL.Path == "/v1/videos/sync" {
+			// Video resolves its model before the JSON branch above. Apply
+			// admission here without ever rewriting the multipart body.
+			// Only verified control-plane context grants the same RPM and
+			// overload exemptions as configured-priority JSON callers.
+			if routeCtx, ok := routeContextClient.Lookup(r.Context(), apiKey, modelName); ok {
+				callerOrgID = routeCtx.OrgID
+				callerOrgResolved = true
+				r = r.WithContext(manager.WithCallerOrg(r.Context(), routeCtx.OrgID))
+				hasConfiguredPriority = routeCtx.Priority != nil
+			}
+
+			rateLimitID := rateLimitIdentity(apiKey)
+			if rlCfg := em.GetRateLimitConfig(modelName); !hasConfiguredPriority && rlCfg != nil && rateLimitID != "" {
+				count, resetIn := em.RequestTracker().Record(rateLimitID, modelName)
+				hardExceeded := rlCfg.HardMaxRequestsPerMinute > 0 && count >= rlCfg.HardMaxRequestsPerMinute
+				softExceeded := rlCfg.MaxRequestsPerMinute > 0 && count >= rlCfg.MaxRequestsPerMinute
+				// There is no trusted video queue-priority transport. Fail
+				// closed at the soft budget too, rather than silently skipping
+				// demotion or corrupting uploads with JSON priority injection.
+				if hardExceeded || softExceeded {
+					secs := int((resetIn + time.Second - 1) / time.Second)
+					w.Header().Set("Retry-After", strconv.Itoa(secs))
+					manager.RateLimitRejectionsTotal.WithLabelValues(modelName).Inc()
+					log.WithFields(log.Fields{
+						"model":               modelName,
+						"retry_after_seconds": secs,
+						"hard_limit":          hardExceeded,
+					}).Warn("rejecting video request over per-key rate limit")
+					jsonError(w, fmt.Sprintf("Request rate exceeded. Retry after %d seconds.", secs), manager.ErrTypeInvalidRequest, http.StatusTooManyRequests)
+					return
+				}
+			}
+		}
+
 		// Measures what cache-aware replica selection would do, without
 		// acting, as aggregate Prometheus metrics. Enabled per model via the
 		// cache_route config block; owned by the manager so the tool loop's
@@ -1035,7 +1070,8 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 		if hasConfiguredPriority {
 			// Configured-priority callers have no 429 path: like internal
 			// dispatches they serve through overload at the warmest host,
-			// where their injected priority jumps the backend queue.
+			// where JSON requests carry an injected backend priority. Video
+			// uses the same admission exemption, but never mutates its form.
 			enclave, probeClaim = model.SelectForDispatchPools(cacheRouteOrder, poolPrimary, poolSpill)
 			if enclave != nil && probeClaim == nil {
 				if ov, _, _ := enclave.ShouldReject(); ov {

@@ -89,6 +89,12 @@ func extractVideoModel(r *http.Request) (string, []byte, error) {
 			disposition != "form-data" || params["name"] == "" {
 			return "", nil, errors.New("invalid multipart Content-Disposition")
 		}
+		// JSON requests strip client priority before dispatch. Video must
+		// preserve exact bytes, so reject priority parts (including files)
+		// instead of forwarding untrusted queue controls or rewriting them.
+		if strings.EqualFold(params["name"], "priority") {
+			return "", nil, errors.New("video priority is controlled by the control plane, not multipart fields")
+		}
 		if params["name"] == "model" {
 			if _, file := params["filename"]; file || model != "" ||
 				len(part.Header.Values("Content-Transfer-Encoding")) != 0 {
