@@ -12,7 +12,9 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/tinfoilsh/confidential-model-router/config"
 	"github.com/tinfoilsh/confidential-model-router/manager"
 )
 
@@ -299,3 +301,251 @@ func TestVideoRouterJSONChatUnaffected(t *testing.T) {
 		t.Fatalf("chat calls=%d status=%d body=%s", calls, rec.Code, rec.Body.String())
 	}
 }
+
+func TestVideoRouterRateLimitAdmission(t *testing.T) {
+	const otherModel = "other-video-limit-fixture"
+	const contentType = `Multipart/Form-Data; charset=utf-8; boundary="video-test-boundary"`
+	retry := int64(45)
+	for _, tc := range []struct {
+		name     string
+		decision string
+		reason   string
+		status   int
+	}{
+		{"rejected", decisionRejected, rateReasonRequests, http.StatusTooManyRequests},
+		{"demote fails closed", decisionDemote, rateReasonRequests, http.StatusTooManyRequests},
+		{"allowed", decisionAllowed, "", http.StatusOK},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			backends := map[string]http.Handler{}
+			for _, name := range []string{videoTestModel, otherModel} {
+				wantBody, _ := videoTestForm(t, name)
+				backends[name] = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					calls++
+					got, err := io.ReadAll(r.Body)
+					if err != nil || !bytes.Equal(got, wantBody) {
+						t.Errorf("admitted multipart changed: %v", err)
+					}
+					if r.Header.Get("Content-Type") != contentType || r.ContentLength != int64(len(wantBody)) {
+						t.Error("admitted multipart headers changed")
+					}
+					if r.Header.Get("Authorization") != "Bearer key-a-fixture" {
+						t.Error("admitted authorization changed")
+					}
+					w.Header().Set("Content-Type", "video/mp4")
+					w.Write([]byte{0, 1, 0xff})
+				})
+			}
+			em := manager.NewVideoRouterTestManager(backends)
+			client := newRouteContextClient("https://control-plane.test.invalid")
+			// Quota is per key and model. The other model stays allowed.
+			client.cache.put(routeContextKey("key-a-fixture", videoTestModel), routeContext{
+				RateLimit: &routeRateLimit{
+					Decision:          tc.decision,
+					Reason:            tc.reason,
+					RetryAfterSeconds: &retry,
+					observedAt:        time.Now(),
+				},
+			}, nil, 1)
+			client.cache.put(routeContextKey("key-a-fixture", otherModel), routeContext{
+				RateLimit: &routeRateLimit{
+					Decision:          decisionAllowed,
+					RetryAfterSeconds: &retry,
+					observedAt:        time.Now(),
+				},
+			}, nil, 1)
+			handler := newRouterHandler(em, client)
+			for _, modelName := range []string{videoTestModel, otherModel} {
+				body, _ := videoTestForm(t, modelName)
+				r := videoTestRequest(body, contentType)
+				r.Header.Set("Authorization", "Bearer key-a-fixture")
+				r.Header.Set("X-Forwarded-Host", otherModel+"."+videoTestDomain)
+				before := calls
+				rec := httptest.NewRecorder()
+				handler.ServeHTTP(rec, r)
+				want := http.StatusOK
+				if modelName == videoTestModel {
+					want = tc.status
+				}
+				if want == http.StatusTooManyRequests {
+					assertVideoQuotaError(t, rec)
+					if calls != before {
+						t.Fatal("rate-limited request reached upstream")
+					}
+					if got := rec.Header().Get("Retry-After"); got != "45" {
+						t.Fatalf("Retry-After=%q, want 45", got)
+					}
+				} else if rec.Code != http.StatusOK || calls != before+1 || rec.Header().Get("Retry-After") != "" {
+					t.Fatalf("%s: status=%d calls=%d body=%s", modelName, rec.Code, calls, rec.Body.String())
+				}
+			}
+		})
+	}
+}
+
+func assertVideoQuotaError(t *testing.T, rec *httptest.ResponseRecorder) {
+	t.Helper()
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("status=%d, want 429: %s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Error struct {
+			Message string `json:"message"`
+			Type    string `json:"type"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("non-JSON error: %v", err)
+	}
+	if rec.Header().Get("Content-Type") != "application/json" || body.Error.Message == "" || body.Error.Type != manager.ErrTypeRateLimit {
+		t.Fatalf("not a rate limit error: %s", rec.Body.String())
+	}
+}
+
+func TestVideoRouterTrustedPriorityAdmission(t *testing.T) {
+	retry := int64(45)
+	for _, tc := range []struct {
+		name     string
+		priority *int
+		decision string
+		overload bool
+		status   int
+		org      string
+	}{
+		{"priority skips demotion", intPtr(-1), decisionDemote, false, http.StatusOK, "org-fixture"},
+		{"priority skips overload", intPtr(0), decisionAllowed, true, http.StatusOK, "org-fixture"},
+		{"demotion fails closed", nil, decisionDemote, false, http.StatusTooManyRequests, ""},
+		{"rejection wins over priority", intPtr(1), decisionRejected, false, http.StatusTooManyRequests, ""},
+		{"no priority overload", nil, decisionAllowed, true, http.StatusServiceUnavailable, ""},
+		{"allowed", nil, decisionAllowed, false, http.StatusOK, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body, _ := videoTestForm(t, videoTestModel)
+			const contentType = `Multipart/Form-Data; charset=utf-8; boundary="video-test-boundary"`
+			calls := 0
+			em := manager.NewVideoRouterTestManager(map[string]http.Handler{
+				videoTestModel: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					calls++
+					got, err := io.ReadAll(r.Body)
+					if err != nil || !bytes.Equal(got, body) {
+						t.Error("configured priority must not inject or rewrite multipart bytes")
+					}
+					if r.Header.Get("Content-Type") != contentType || r.Header.Get("Authorization") != "Bearer video-test-only-token" {
+						t.Error("configured priority changed request headers")
+					}
+					if got := manager.CallerFromContext(r.Context()).OrgID; got != tc.org {
+						t.Errorf("caller org=%q, want %q", got, tc.org)
+					}
+					w.Header().Set("Content-Type", "video/mp4")
+					w.Write([]byte{0, 0xff})
+				}),
+			})
+			model, _ := em.GetModel(videoTestModel)
+			if tc.overload {
+				model.Overload = &config.OverloadConfig{MaxRequestsWaiting: 1, RetryAfterMinutes: 1}
+				for _, enclave := range model.Enclaves {
+					enclave.SetVideoRouterTestOverloaded()
+				}
+			}
+			client := newRouteContextClient("https://control-plane.test.invalid")
+			org := ""
+			if tc.priority != nil {
+				org = "org-fixture"
+			}
+			reason := ""
+			if tc.decision == decisionDemote {
+				reason = rateReasonRequests
+			}
+			if tc.decision == decisionRejected {
+				reason = rateReasonRequests
+			}
+			client.cache.put(routeContextKey("video-test-only-token", videoTestModel), routeContext{
+				Priority: tc.priority,
+				OrgID:    org,
+				RateLimit: &routeRateLimit{
+					Decision:          tc.decision,
+					Reason:            reason,
+					RetryAfterSeconds: &retry,
+					observedAt:        time.Now(),
+				},
+			}, nil, 1)
+			r := videoTestRequest(body, contentType)
+			r.Header.Set("Priority", "-999")
+			r.Header.Set("X-Tinfoil-Org-Id", "attacker-org")
+			rec := httptest.NewRecorder()
+			newRouterHandler(em, client).ServeHTTP(rec, r)
+			if tc.status == http.StatusOK {
+				if rec.Code != http.StatusOK || calls != 1 || rec.Header().Get("Retry-After") != "" {
+					t.Fatalf("admitted: status=%d calls=%d body=%s", rec.Code, calls, rec.Body.String())
+				}
+				return
+			}
+			if calls != 0 {
+				t.Fatal("rejected video request reached upstream")
+			}
+			if tc.status == http.StatusTooManyRequests {
+				assertVideoQuotaError(t, rec)
+				if got := rec.Header().Get("Retry-After"); got != "45" {
+					t.Fatalf("Retry-After=%q, want 45", got)
+				}
+				return
+			}
+			if rec.Code != tc.status {
+				t.Fatalf("status=%d, want %d: %s", rec.Code, tc.status, rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestVideoRouterRejectsClientPriority(t *testing.T) {
+	body, contentType := videoTestForm(t, videoTestModel)
+	for _, disposition := range []string{
+		`name="priority"`,
+		`name="priority"; filename="priority.txt"`,
+		`name="Priority"`,
+		`name*=UTF-8''priority`,
+	} {
+		for _, beforeModel := range []bool{false, true} {
+			for _, trusted := range []bool{false, true} {
+				t.Run(disposition+"/before="+strconv.FormatBool(beforeModel)+"/trusted="+strconv.FormatBool(trusted), func(t *testing.T) {
+					priorityPart := []byte("--video-test-boundary\r\nContent-Disposition: form-data; " + disposition + "\r\n\r\n-999\r\n")
+					var attack []byte
+					if beforeModel {
+						attack = append(priorityPart, body...)
+					} else {
+						closing := []byte("--video-test-boundary--\r\n")
+						attack = bytes.Replace(body, closing, append(priorityPart, closing...), 1)
+					}
+					calls := 0
+					em := manager.NewVideoRouterTestManager(map[string]http.Handler{
+						videoTestModel: http.HandlerFunc(func(http.ResponseWriter, *http.Request) { calls++ }),
+					})
+					var client *routeContextClient
+					if trusted {
+						priority := -1
+						client = newRouteContextClient("https://control-plane.test.invalid")
+						retry := int64(1)
+						client.cache.put(routeContextKey("video-test-only-token", videoTestModel), routeContext{
+							Priority: &priority,
+							OrgID:    "org-fixture",
+							RateLimit: &routeRateLimit{
+								Decision:          decisionAllowed,
+								RetryAfterSeconds: &retry,
+								observedAt:        time.Now(),
+							},
+						}, nil, 1)
+					}
+					rec := httptest.NewRecorder()
+					newRouterHandler(em, client).ServeHTTP(rec, videoTestRequest(attack, contentType))
+					assertVideoRouterError(t, rec, http.StatusBadRequest)
+					if calls != 0 {
+						t.Fatal("client priority reached upstream")
+					}
+				})
+			}
+		}
+	}
+}
+
+func intPtr(v int) *int { return &v }

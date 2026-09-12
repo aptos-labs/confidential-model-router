@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sync"
+	"time"
 )
 
 // NewVideoRouterTestManager is only compiled with the routertest tag. It gives
@@ -24,6 +25,14 @@ func NewVideoRouterTestManager(backends map[string]http.Handler) *EnclaveManager
 		}})
 	}
 	return em
+}
+
+// SetVideoRouterTestOverloaded installs a fresh queue sample without starting
+// a metrics poller. The model's Overload policy must trip at this depth.
+// Call only while setting up the fixture, before serving.
+func (e *Enclave) SetVideoRouterTestOverloaded() {
+	e.metrics = newEnclaveMetrics(e.host, e.modelName)
+	e.metrics.updateLatest(requestCounts{waiting: 5, hasWaiting: true}, time.Now())
 }
 
 type videoRouterTestTransport struct {
