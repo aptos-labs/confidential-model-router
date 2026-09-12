@@ -37,3 +37,13 @@ Client side tool calling is handled by the client. Server-side tools currently s
 To handle prompting, we add some instructions about how to call each tool in the system prompt, and we have a short description in each tool.
 
 _vLLM handles putting the system prompt + the tool prompts together, using internal templates built for the specific models._
+
+## Aptos deployment image publication
+
+`publish-router-image.yml` builds a manually selected full commit SHA reachable from
+`deploy-base-v0.0.142` and publishes an amd64 image to
+`ghcr.io/aptos-labs/confidential-model-router:sha-<commit>`. It does not build the
+unpatched default branch or publish a CVM release. The workflow summary records the
+immutable registry digest and source revision. Confirm anonymous image pulls work,
+then pin that digest in the measured Router CVM configuration before publishing its
+matching release. No registry credentials belong in CVM configuration.
