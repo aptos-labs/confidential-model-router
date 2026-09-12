@@ -476,18 +476,59 @@ func main() {
 
 	routeContextClient := newRouteContextClient(*controlPlaneURL)
 
-	// Measures what cache-aware replica selection would do, without
-	// acting, as aggregate Prometheus metrics. Enabled per model via the
-	// cache_route config block; owned by the manager so the tool loop's
-	// internal dispatches are observed too.
-	cacheRouteShadow := em.CacheRouteShadow()
+	http.Handle("/", newRouterHandler(em, routeContextClient))
 
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+	// Setup graceful shutdown
+	server := &http.Server{
+		Addr:         ":" + *port,
+		Handler:      nil,             // Use default ServeMux
+		ReadTimeout:  5 * time.Minute, // Increased to support large RAG payloads
+		WriteTimeout: 0,               // Disabled to support long-running streaming responses
+	}
+
+	// Handle shutdown signals
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+
+	go func() {
+		log.Printf("Starting proxy server on port %s\n", *port)
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatal(err)
+		}
+	}()
+
+	// Wait for shutdown signal
+	<-sigChan
+	log.Info("Shutting down server...")
+
+	// Create shutdown context with timeout
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Shutdown server
+	if err := server.Shutdown(ctx); err != nil {
+		log.WithError(err).Error("Failed to gracefully shutdown server")
+	}
+
+	log.Info("Server stopped")
+}
+
+// newRouterHandler separates request handling from startup, which performs
+// attestation and starts background workers. Tests need neither side effect.
+func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeContextClient) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
 		// Timestamp arrival before any parsing or routing: the first-token
 		// SLA is measured from the edge of the router, so time spent on
 		// body handling, route-context lookups, and replica selection is
 		// part of what it reports.
 		requestStart := time.Now()
+
+		// Reject methods on this exact endpoint before inspecting the body size.
+		if r.URL.Path == "/v1/videos/sync" && r.Method != http.MethodPost {
+			w.Header().Set("Allow", http.MethodPost)
+			jsonError(w, fmt.Sprintf("Invalid request: %v.", errVideoMethod), manager.ErrTypeInvalidRequest, http.StatusMethodNotAllowed)
+			return
+		}
 
 		if !limitRequestBody(w, r) {
 			return
@@ -517,8 +558,17 @@ func main() {
 		// Extract API key early for rate limiting decisions
 		apiKey := manager.BearerToken(r.Header.Get("Authorization"))
 
-		if modelName, err = parseModelFromSubdomain(r, *domain); err != nil {
-			jsonError(w, fmt.Sprintf("Invalid request: %v.", err), manager.ErrTypeInvalidRequest, http.StatusBadRequest)
+		if modelName, err = parseRequestModel(r, *domain); err != nil {
+			var tooLarge *http.MaxBytesError
+			if errors.As(err, &tooLarge) {
+				writeRequestBodyError(w, err)
+				return
+			}
+			status := http.StatusBadRequest
+			if errors.Is(err, errVideoMediaType) {
+				status = http.StatusUnsupportedMediaType
+			}
+			jsonError(w, fmt.Sprintf("Invalid request: %v.", err), manager.ErrTypeInvalidRequest, status)
 			return
 		}
 
@@ -939,6 +989,12 @@ func main() {
 			return
 		}
 
+		// Measures what cache-aware replica selection would do, without
+		// acting, as aggregate Prometheus metrics. Enabled per model via the
+		// cache_route config block; owned by the manager so the tool loop's
+		// internal dispatches are observed too.
+		cacheRouteShadow := em.CacheRouteShadow()
+
 		// Resolve the caller's reservation pools. Only reserved models pay
 		// for org resolution; a failed lookup fails closed to shared.
 		var poolPrimary, poolSpill map[string]bool
@@ -1099,39 +1155,5 @@ func main() {
 		}()
 		enclave.ServeHTTP(w, r)
 		served = true
-	})
-
-	// Setup graceful shutdown
-	server := &http.Server{
-		Addr:         ":" + *port,
-		Handler:      nil,             // Use default ServeMux
-		ReadTimeout:  5 * time.Minute, // Increased to support large RAG payloads
-		WriteTimeout: 0,               // Disabled to support long-running streaming responses
 	}
-
-	// Handle shutdown signals
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-
-	go func() {
-		log.Printf("Starting proxy server on port %s\n", *port)
-		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatal(err)
-		}
-	}()
-
-	// Wait for shutdown signal
-	<-sigChan
-	log.Info("Shutting down server...")
-
-	// Create shutdown context with timeout
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	// Shutdown server
-	if err := server.Shutdown(ctx); err != nil {
-		log.WithError(err).Error("Failed to gracefully shutdown server")
-	}
-
-	log.Info("Server stopped")
 }

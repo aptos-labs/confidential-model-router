@@ -10,6 +10,30 @@ The router accepts OpenAI-compatible bodies on `/v1/chat/completions` and `/v1/r
 - `web_search_options` — activates the web-search tool profile.
 - `pii_check_options` — activates the PII safety check.
 
+`POST /v1/videos/sync` requires `multipart/form-data` with exactly one nonempty
+text `model` field naming a configured model. Surrounding whitespace, duplicate
+selectors (including file parts named `model`), encoded selectors, and malformed
+forms are rejected. The selector is required even on a model subdomain; forwarded
+host headers cannot override it. The multipart bytes, Content-Type boundary, and
+Authorization are forwarded unchanged. Forms allow at most 128 parts total
+(including files and the model field), and the model field is limited to 256 bytes,
+not characters. Exceeding either cap returns 400. The existing 64 MiB request limit
+applies to POST bodies.
+Invalid forms return an OpenAI-style 400 error, unsupported media types 415,
+non-POST methods 405 (`Allow: POST`), oversized POST bodies 413, and unknown models
+404. Non-POST requests to the exact `/v1/videos/sync` path return 405 before any
+body-size check, even for oversized bodies. Other endpoints retain their existing
+body-size limits.
+This selects a configured model; it does not validate video capability (the model
+configuration has no endpoint allowlist or capability field). Rejecting configured
+but video-incompatible models is a follow-up, not implemented in this draft.
+
+Video parser regressions run with `go test . -run 'TestVideo'`. Focused integration
+coverage runs with `go test -tags routertest . -run 'TestVideoRouter'`; that tag
+only enables an in-memory manager fixture, avoiding attestation and background
+services while exercising the real handler, model selection, and reverse proxy.
+This is a review draft, not a deployment-readiness claim.
+
 ## Tool Calling
 
 Client side tool calling is handled by the client. Server-side tools currently supported: **web search** and **code execution**.
