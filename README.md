@@ -11,6 +11,14 @@ For each request the router:
 3. Runs any server-side tools the request asked for (web search, PII check)
 4. Streams the enclave's response back to the client
 
+## Synchronous video
+
+`POST /v1/videos/sync` requires `multipart/form-data` with exactly one nonempty text `model` field naming a configured model. The multipart bytes, Content-Type boundary, and Authorization are forwarded unchanged. Forms allow at most 128 parts, and the model field is limited to 256 bytes. The 64 MiB request limit applies to POST bodies.
+
+Invalid forms return an OpenAI-style 400 error, unsupported media types 415, non-POST methods 405 (`Allow: POST`), oversized POST bodies 413, and unknown models 404. Non-POST requests to the exact `/v1/videos/sync` path return 405 before any body-size check. This selects a configured model; it does not validate video capability.
+
+Video parser regressions run with `go test . -run 'TestVideo'`. Focused integration coverage runs with `go test -tags routertest . -run 'TestVideoRouter'`.
+
 Client-facing behavior is documented at [docs.tinfoil.sh](https://docs.tinfoil.sh):
 
 - [Models](https://docs.tinfoil.sh/models/overview)

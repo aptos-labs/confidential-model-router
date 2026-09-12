@@ -122,6 +122,24 @@ func writeRequestBodyError(w http.ResponseWriter, err error) {
 	writeError(w, &manager.ErrBodyReadFailed)
 }
 
+func writeVideoSyncError(w http.ResponseWriter, err error) {
+	var tooLarge *http.MaxBytesError
+	if errors.As(err, &tooLarge) {
+		writeRequestBodyError(w, err)
+		return
+	}
+	if errors.Is(err, errVideoMethod) {
+		w.Header().Set("Allow", http.MethodPost)
+		writeError(w, manager.ErrMethodNotAllowed.WithMessage("%s", err.Error()))
+		return
+	}
+	apiErr := manager.ErrInvalidRequest.WithMessage("%s", err.Error())
+	if errors.Is(err, errVideoMediaType) {
+		apiErr = apiErr.WithStatus(http.StatusUnsupportedMediaType)
+	}
+	writeError(w, apiErr)
+}
+
 // invalidJSONError builds the error for a request body that failed JSON
 // decoding. Decoder errors describe what the client sent and are passed on;
 // any other failure (transport, size limit tripping mid-decode) is logged and
@@ -521,7 +539,10 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 	// acting, as aggregate Prometheus metrics. Enabled per model via the
 	// cache_route config block; owned by the manager so the tool loop's
 	// internal dispatches are observed too.
-	cacheRouteShadow := em.CacheRouteShadow()
+	var cacheRouteShadow *cacheroute.Shadow
+	if em != nil {
+		cacheRouteShadow = em.CacheRouteShadow()
+	}
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Timestamp arrival before any parsing or routing: the first-token
@@ -530,6 +551,13 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 		// part of what it reports.
 		requestStart := time.Now()
 
+		// Reject methods on this exact endpoint before inspecting the body size.
+		if r.URL.Path == "/v1/videos/sync" && r.Method != http.MethodPost {
+			w.Header().Set("Allow", http.MethodPost)
+			writeError(w, manager.ErrMethodNotAllowed.WithMessage("%s", errVideoMethod.Error()))
+			return
+		}
+
 		if !limitRequestBody(w, r) {
 			return
 		}
@@ -537,6 +565,18 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 		var modelName string
 		var err error
 		var speechBody map[string]any
+		// Set when POST /v1/videos/sync parsed its model without rewriting the form.
+		var videoModel string
+		if r.URL.Path == "/v1/videos/sync" {
+			var body []byte
+			videoModel, body, err = extractVideoModel(r)
+			if err != nil {
+				writeVideoSyncError(w, err)
+				return
+			}
+			// Restore the original bytes. Content-Length and Content-Type stay as sent.
+			r.Body = io.NopCloser(bytes.NewReader(body))
+		}
 
 		// Set when the request is eligible for cache-route shadow
 		// observation.
@@ -782,6 +822,11 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 				r.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(bodyBytes)), nil }
 			} else if r.URL.Path == "/v1/convert/file" {
 				modelName = "doc-upload"
+			} else if r.URL.Path == "/v1/videos/sync" {
+				// The form was validated above, before any manager call, so a
+				// nil manager still rejects bad video requests. The selector
+				// is the only model source; forwarded host headers cannot override it.
+				modelName = videoModel
 			} else { // This is an OpenAI-compatible API request
 				bodyBytes, err := io.ReadAll(r.Body)
 
