@@ -1029,6 +1029,22 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 			if !admit() {
 				return
 			}
+			// Video has no trusted queue-priority field. A demotion, which
+			// JSON carries by rewriting the body, fails closed here instead.
+			// Configured priority is an admission exemption only; the form
+			// is never rewritten. A rejected decision already returned above.
+			if r.URL.Path == "/v1/videos/sync" && !hasConfiguredPriority &&
+				admission.RateLimit != nil && admission.RateLimit.Decision == decisionDemote {
+				retry := *admission.RateLimit.RetryAfterSeconds
+				w.Header().Set("Retry-After", strconv.FormatInt(retry, 10))
+				manager.RateLimitRejectionsTotal.WithLabelValues(modelName).Inc()
+				log.WithFields(log.Fields{
+					"model":               modelName,
+					"retry_after_seconds": retry,
+				}).Warn("rejecting video request over demoted quota")
+				writeError(w, manager.ErrRateLimited.WithMessage(manager.ErrMsgRateLimited, retry))
+				return
+			}
 			if speechBody != nil {
 				// Speech does not support cache salting.
 				applyCacheSalt(speechBody, r.URL.Path, apiKey, false)

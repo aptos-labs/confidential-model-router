@@ -17,6 +17,8 @@ For each request the router:
 
 Invalid forms return an OpenAI-style 400 error, unsupported media types 415, non-POST methods 405 (`Allow: POST`), oversized POST bodies 413, and unknown models 404. Non-POST requests to the exact `/v1/videos/sync` path return 405 before any body-size check. This selects a configured model; it does not validate video capability.
 
+Video admission uses the same control-plane route context as other inference requests. A rejected quota decision returns 429. A demotion also returns 429, because the multipart body has no trusted priority field to rewrite. Configured priority skips that demotion and overload shedding, and it is not copied into the form. Client `priority` parts, including files, return 400. Admitted bodies, Content-Type, and Authorization are forwarded unchanged.
+
 Video parser regressions run with `go test . -run 'TestVideo'`. Focused integration coverage runs with `go test -tags routertest . -run 'TestVideoRouter'`.
 
 Client-facing behavior is documented at [docs.tinfoil.sh](https://docs.tinfoil.sh):
