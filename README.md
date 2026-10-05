@@ -2,6 +2,30 @@
 
 Tinfoil's model router is the entry point for confidential inference. It terminates TLS (optionally with [EHBP](https://docs.tinfoil.sh/resources/ehbp)), reads the model name from an OpenAI-compatible request, and forwards the request to a verified secure enclave serving that model.
 
+## License and Aptos Labs modifications
+
+This repository is Aptos Labs' modified version of
+[tinfoilsh/confidential-model-router](https://github.com/tinfoilsh/confidential-model-router),
+released under the GNU Affero General Public License v3 (see `LICENSE`).
+Aptos Labs runs it as `router.inference.aptoslabs.com`.
+
+**Source offer (AGPL-3.0 section 13).** Every router response carries the
+`X-Source-Code` and `X-License` headers. `GET /source` (also `/`) and `GET /health`
+return the license and the URL of the Corresponding Source of the running build.
+For builds published with an `aptos-<commit>` version, that URL is the exact
+source commit: `https://github.com/aptos-labs/confidential-model-router/tree/<commit>`.
+
+Aptos Labs modifications, carried onto current upstream:
+
+| Date | Change | Files |
+|---|---|---|
+| 2026-09-11 | Route synchronous video multipart requests (`/v1/videos/sync`) without rewriting bodies | `main.go`, `video_sync.go`, `video_sync_test.go`, `video_sync_handler_test.go`, `manager/router_video_test_support.go` |
+| 2026-09-11 | Test preservation of multimodal SSE metadata and final audio chunks | `tokencount/omni_stream_test.go` |
+| 2026-09-12 | Enforce rate and priority admission for video requests | `main.go`, `video_sync_handler_test.go` |
+| 2026-10-05 | AGPL-3.0 source offer (headers, `/source`, `/`, `/health` fields); license file and label in the image | `main.go`, `source_offer.go`, `source_offer_test.go`, `source_offer_router_test.go`, `Dockerfile`, `README.md` |
+
+The full history is in this repository's git log.
+
 ## How it works
 
 For each request the router:
