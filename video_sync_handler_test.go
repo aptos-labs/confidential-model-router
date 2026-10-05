@@ -1,5 +1,8 @@
 //go:build routertest
 
+// Copyright 2026 Aptos Labs. Added to tinfoilsh/confidential-model-router on 2026-09-11.
+// Licensed under the GNU Affero General Public License v3, like the rest of this program.
+
 package main
 
 import (
@@ -91,6 +94,8 @@ func TestVideoRouterRoutingAndBinaryResponse(t *testing.T) {
 						"Content-Disposition": `attachment; filename="result.mp4"`,
 						"X-Request-Id":        "fixture-response",
 						"Tinfoil-Enclave":     model + ".test.invalid",
+						sourceOfferHeader:     correspondingSourceURL(),
+						licenseHeader:         licenseID,
 					} {
 						if got := rec.Header().Get(key); got != want {
 							t.Errorf("response %s=%q, want %q", key, got, want)

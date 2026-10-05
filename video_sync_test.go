@@ -1,3 +1,6 @@
+// Copyright 2026 Aptos Labs. Added to tinfoilsh/confidential-model-router on 2026-09-11.
+// Licensed under the GNU Affero General Public License v3, like the rest of this program.
+
 package main
 
 import (
