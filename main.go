@@ -1,3 +1,7 @@
+// Modified by Aptos Labs: synchronous video multipart routing and video request admission
+// (2026-09-11 to 2026-09-12), and the AGPL-3.0 section 13 source offer (2026-10-05).
+// See "Aptos Labs modifications" in README.md. Licensed under the GNU AGPL v3.
+
 package main
 
 import (
@@ -34,6 +38,21 @@ var configFile []byte // Initial (attested) config
 
 // Set by build process
 var version = "dev"
+
+// sourceURL optionally overrides the Corresponding Source location offered to
+// network users (AGPL-3.0 section 13). Set it with -ldflags "-X main.sourceURL=...".
+// When it is empty, the URL is derived from an "aptos-<commit>" version string.
+var sourceURL = ""
+
+const (
+	licenseID          = "AGPL-3.0"
+	sourceRepoURL      = "https://github.com/aptos-labs/confidential-model-router"
+	sourceOfferHeader  = "X-Source-Code"
+	licenseHeader      = "X-License"
+	sourceOfferMessage = "This service runs a modified version of tinfoilsh/confidential-model-router, " +
+		"licensed under the GNU Affero General Public License v3. The complete Corresponding " +
+		"Source of the running version is available at no charge at the source URL."
+)
 
 const maxRequestBodySize int64 = 64 * 1024 * 1024
 
@@ -523,6 +542,9 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 		// part of what it reports.
 		requestStart := time.Now()
 
+		// AGPL-3.0 section 13: offer the Corresponding Source on every response.
+		setSourceOfferHeaders(w.Header())
+
 		// Reject methods on this exact endpoint before inspecting the body size.
 		if r.URL.Path == "/v1/videos/sync" && r.Method != http.MethodPost {
 			w.Header().Set("Allow", http.MethodPost)
@@ -630,19 +652,26 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 				"path":  r.URL.Path,
 			}).Debug("WebSocket upgrade request")
 		} else if modelName == "" { // The request does not use a subdomain. We route using specific inference routing logic.
-			if r.URL.Path == "/" {
-				http.Redirect(w, r, "https://docs.tinfoil.sh", http.StatusTemporaryRedirect)
+			if r.URL.Path == "/" || r.URL.Path == "/source" {
+				sendJSON(w, sourceOffer())
 				return
 			} else if r.URL.Path == "/health" {
 				if !em.Ready() {
 					w.Header().Set("Content-Type", "application/json")
 					w.WriteHeader(http.StatusServiceUnavailable)
 					json.NewEncoder(w).Encode(map[string]any{
-						"status": "not ready",
+						"status":  "not ready",
+						"license": licenseID,
+						"source":  correspondingSourceURL(),
 					})
 					return
 				}
-				sendJSON(w, map[string]any{"status": "ok", "version": version})
+				sendJSON(w, map[string]any{
+					"status":  "ok",
+					"version": version,
+					"license": licenseID,
+					"source":  correspondingSourceURL(),
+				})
 				return
 			} else if r.URL.Path == "/.well-known/tinfoil-proxy" {
 				status := em.Status()
