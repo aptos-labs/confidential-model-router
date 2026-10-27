@@ -3,6 +3,7 @@ package toolruntime
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -39,6 +40,22 @@ type upstreamError struct {
 
 func (e *upstreamError) Error() string {
 	return fmt.Sprintf("upstream returned status %d: %s", e.statusCode, strings.TrimSpace(string(e.body)))
+}
+
+// LogString describes the error without the upstream body. The body can echo
+// request or completion content, which must never reach router logs.
+func (e *upstreamError) LogString() string {
+	return fmt.Sprintf("upstream returned status %d (%d-byte body redacted)", e.statusCode, len(e.body))
+}
+
+// LogSafeError returns a description of err that is safe to log. For an
+// upstream error it omits the upstream response body.
+func LogSafeError(err error) string {
+	var upErr *upstreamError
+	if errors.As(err, &upErr) {
+		return upErr.LogString()
+	}
+	return err.Error()
 }
 
 type usageAccumulator struct {

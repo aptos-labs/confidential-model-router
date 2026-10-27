@@ -190,13 +190,17 @@ var (
 )
 
 func jsonError(w http.ResponseWriter, message string, errType string, code int) {
+	// Log the status and error type only. Messages for invalid requests can
+	// quote fragments of the request body (for example JSON parse errors),
+	// and request content must never reach router logs. The full message is
+	// still returned to the caller.
 	switch {
 	case code >= 500:
-		log.Errorf("jsonError: %s", message)
+		log.Errorf("jsonError: status=%d type=%s", code, errType)
 	case code >= 400:
-		log.Warnf("jsonError: %s", message)
+		log.Warnf("jsonError: status=%d type=%s", code, errType)
 	default:
-		log.Debugf("jsonError: %s", message)
+		log.Debugf("jsonError: status=%d type=%s", code, errType)
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -952,7 +956,7 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 						}()
 					}
 					if err := toolruntime.Handle(tw, r, em, activeProfiles, body, modelName, routerOpts); err != nil {
-						log.WithError(err).WithFields(log.Fields{
+						log.WithField("error", toolruntime.LogSafeError(err)).WithFields(log.Fields{
 							"model": modelName,
 							"path":  r.URL.Path,
 						}).Error("tool runtime failed")
