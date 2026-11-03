@@ -114,3 +114,32 @@ models:
 		t.Fatal("absent reservations must stay nil")
 	}
 }
+
+func TestCacheSaltConfigParsing(t *testing.T) {
+	cfg, err := FromBytes([]byte(`
+models:
+  enabled:
+    repo: org/repo
+    enclaves: [a.example]
+    cache_salt: true
+  disabled:
+    repo: org/repo
+    enclaves: [b.example]
+    cache_salt: false
+  plain:
+    repo: org/repo
+    enclaves: [c.example]
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Models["enabled"].CacheSalt == nil || !*cfg.Models["enabled"].CacheSalt {
+		t.Fatalf("enabled CacheSalt = %v, want true", cfg.Models["enabled"].CacheSalt)
+	}
+	if cfg.Models["disabled"].CacheSalt == nil || *cfg.Models["disabled"].CacheSalt {
+		t.Fatalf("disabled CacheSalt = %v, want false", cfg.Models["disabled"].CacheSalt)
+	}
+	if cfg.Models["plain"].CacheSalt != nil {
+		t.Fatalf("plain CacheSalt = %v, want nil", cfg.Models["plain"].CacheSalt)
+	}
+}

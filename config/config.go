@@ -58,6 +58,7 @@ type Model struct {
 	Overload     *OverloadConfig     `yaml:"overload,omitempty"`
 	RateLimit    *RateLimitConfig    `yaml:"rate_limit,omitempty"`
 	CacheRoute   *CacheRouteConfig   `yaml:"cache_route,omitempty"`
+	CacheSalt    *bool               `yaml:"cache_salt,omitempty"`
 	Reservations []ReservationConfig `yaml:"reservations,omitempty"`
 }
 

@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tinfoilsh/confidential-model-router/cachesalt"
 	"github.com/tinfoilsh/confidential-model-router/config"
 	"github.com/tinfoilsh/confidential-model-router/manager"
 	"github.com/tinfoilsh/confidential-model-router/ratelimit"
@@ -306,6 +307,61 @@ func TestVideoRouterJSONChatUnaffected(t *testing.T) {
 	newRouterHandler(em, nil).ServeHTTP(rec, r)
 	if calls != 1 || rec.Code != http.StatusOK || rec.Body.String() != reply {
 		t.Fatalf("chat calls=%d status=%d body=%s", calls, rec.Code, rec.Body.String())
+	}
+}
+
+func TestRouterPerModelCacheSalt(t *testing.T) {
+	oldSalt := *cacheSaltEnabled
+	*cacheSaltEnabled = false
+	t.Cleanup(func() { *cacheSaltEnabled = oldSalt })
+
+	const saltedModel = "glm-5.3"
+	const unsaltedModel = "qwen3-omni"
+	const reply = `{"choices":[{"message":{"role":"assistant","content":"ok"}}]}`
+	wantSalt, _ := cachesalt.Derive("tenant-key-1", "")
+
+	var gotSalted, gotUnsalted map[string]any
+	em := manager.NewVideoRouterTestManager(map[string]http.Handler{
+		saltedModel: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if err := json.NewDecoder(r.Body).Decode(&gotSalted); err != nil {
+				t.Errorf("decode salted upstream: %v", err)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			io.WriteString(w, reply)
+		}),
+		unsaltedModel: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if err := json.NewDecoder(r.Body).Decode(&gotUnsalted); err != nil {
+				t.Errorf("decode unsalted upstream: %v", err)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			io.WriteString(w, reply)
+		}),
+	})
+	enabled := true
+	if m, ok := em.GetModel(saltedModel); ok {
+		m.CacheSalt = &enabled
+	} else {
+		t.Fatal("saltedModel missing from test manager")
+	}
+
+	handler := newRouterHandler(em, nil)
+	for _, model := range []string{saltedModel, unsaltedModel} {
+		body := `{"model":"` + model + `","messages":[{"role":"user","content":"hi"}],"stream":false,"cache_salt":"client-forged"}`
+		r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+		r.Header.Set("Content-Type", "application/json")
+		r.Header.Set("Authorization", "Bearer tenant-key-1")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, r)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s status=%d body=%s", model, rec.Code, rec.Body.String())
+		}
+	}
+
+	if got, _ := gotSalted["cache_salt"].(string); got != wantSalt {
+		t.Errorf("salted model upstream cache_salt = %q, want %q", got, wantSalt)
+	}
+	if _, present := gotUnsalted["cache_salt"]; present {
+		t.Errorf("unsalted model received unexpected cache_salt: %v", gotUnsalted["cache_salt"])
 	}
 }
 

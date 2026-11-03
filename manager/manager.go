@@ -53,6 +53,7 @@ type Model struct {
 	Overload          *config.OverloadConfig   `json:"overload,omitempty"`
 	RateLimit         *config.RateLimitConfig  `json:"rate_limit,omitempty"`
 	CacheRoute        *config.CacheRouteConfig `json:"cache_route,omitempty"`
+	CacheSalt         *bool                    `json:"cache_salt,omitempty"`
 	// Reservations is excluded from JSON: Status() feeds the public
 	// /.well-known/tinfoil-proxy endpoint, and org ids must not be
 	// exposed there.
@@ -234,6 +235,25 @@ func (em *EnclaveManager) GetRateLimitConfig(modelName string) *config.RateLimit
 	model.mu.RLock()
 	defer model.mu.RUnlock()
 	return model.RateLimit
+}
+
+// CacheSaltEnabled resolves whether cache_salt injection is enabled for a
+// model: an explicit per-model cache_salt setting in config.yml overrides the
+// process-wide default.
+func (em *EnclaveManager) CacheSaltEnabled(modelName string, defaultEnabled bool) bool {
+	if em == nil {
+		return defaultEnabled
+	}
+	model, found := em.GetModel(modelName)
+	if !found {
+		return defaultEnabled
+	}
+	model.mu.RLock()
+	defer model.mu.RUnlock()
+	if model.CacheSalt != nil {
+		return *model.CacheSalt
+	}
+	return defaultEnabled
 }
 
 // Bound network steps of enclave verification. Var for tests
@@ -937,6 +957,7 @@ func (em *EnclaveManager) addModel(modelName string, modelConfig config.Model) {
 		Overload:          modelConfig.Overload,
 		RateLimit:         modelConfig.RateLimit,
 		CacheRoute:        modelConfig.CacheRoute,
+		CacheSalt:         modelConfig.CacheSalt,
 		expectedHosts:     len(modelConfig.Hostnames),
 	}
 	model.applyReservations(modelName, modelConfig.Reservations, modelConfig.Hostnames)
@@ -1049,6 +1070,7 @@ func (em *EnclaveManager) sync() error {
 			model.Overload = configModel.Overload
 			model.RateLimit = configModel.RateLimit
 			model.CacheRoute = configModel.CacheRoute
+			model.CacheSalt = configModel.CacheSalt
 			model.applyReservations(modelName, configModel.Reservations, configModel.Hostnames)
 			for _, enclave := range model.Enclaves {
 				enclave.updateOverloadConfig(model.Overload)
