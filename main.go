@@ -883,7 +883,7 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 				// user_cache_secret, strip any client-supplied cache_salt,
 				// and (when enabled) inject the derived per-principal salt
 				// on endpoints that support it.
-				mode, _ := applyCacheSalt(body, r.URL.Path, apiKey, *cacheSaltEnabled)
+				mode, _ := applyCacheSalt(body, r.URL.Path, apiKey, em.CacheSaltEnabled(modelName, *cacheSaltEnabled))
 				recordCacheSaltInjection(modelName, mode)
 
 				// Check per-key rate limits: reject with 429 over the hard
@@ -1000,7 +1000,7 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 				jsonError(w, manager.ErrMsgModelNotFound, manager.ErrTypeInvalidRequest, http.StatusNotFound)
 				return
 			}
-			mode, streamRequested, err := saltProxiedBody(r, apiKey, *cacheSaltEnabled)
+			mode, streamRequested, err := saltProxiedBody(r, apiKey, em.CacheSaltEnabled(modelName, *cacheSaltEnabled))
 			if err != nil {
 				var tooLarge *http.MaxBytesError
 				if errors.As(err, &tooLarge) {

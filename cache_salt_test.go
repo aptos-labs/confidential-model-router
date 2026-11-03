@@ -419,3 +419,44 @@ func decodeBody(t *testing.T, req *http.Request) map[string]any {
 	}
 	return m
 }
+
+func TestCacheSaltEnabledPerModelOverride(t *testing.T) {
+	cfgBytes := []byte(`
+models:
+  salted-model:
+    repo: org/repo
+    enclaves: [a.example]
+    cache_salt: true
+  unsalted-model:
+    repo: org/repo
+    enclaves: [b.example]
+    cache_salt: false
+  default-model:
+    repo: org/repo
+    enclaves: [c.example]
+`)
+	em, err := manager.NewEnclaveManager(cfgBytes, "https://api.inference.aptoslabs.com/", "id", "sec", "", "", "", "", 60*1e9, false)
+	if err != nil {
+		t.Fatalf("NewEnclaveManager: %v", err)
+	}
+	t.Cleanup(em.Shutdown)
+
+	for _, tc := range []struct {
+		model          string
+		defaultEnabled bool
+		want           bool
+	}{
+		{"salted-model", false, true},
+		{"salted-model", true, true},
+		{"unsalted-model", false, false},
+		{"unsalted-model", true, false},
+		{"default-model", false, false},
+		{"default-model", true, true},
+		{"unknown-model", false, false},
+		{"unknown-model", true, true},
+	} {
+		if got := em.CacheSaltEnabled(tc.model, tc.defaultEnabled); got != tc.want {
+			t.Errorf("CacheSaltEnabled(%q, %v) = %v, want %v", tc.model, tc.defaultEnabled, got, tc.want)
+		}
+	}
+}
