@@ -29,6 +29,7 @@ import (
 )
 
 type Enclave struct {
+	backendAuth backendCredentials
 	host        string
 	modelName   string
 	tlsKeyFP    string
@@ -185,6 +186,7 @@ func (m *Model) ReservationPools(caller Caller) (primary, spill map[string]bool,
 }
 
 type EnclaveManager struct {
+	backendAuth          backendCredentials
 	verifications        singleflight.Group
 	models               *sync.Map // model name -> *Model
 	multimodalModels     sync.Map  // sticky set of multimodal chat model names
@@ -361,6 +363,7 @@ func (em *EnclaveManager) refreshEnclave(modelName, host string) (err error) {
 		},
 	}
 	model.installEnclaveLocked(host, &Enclave{
+		backendAuth: em.backendAuth,
 		host:        host,
 		modelName:   modelName,
 		predicate:   verification.EnclaveMeasurement.Type,
@@ -593,6 +596,7 @@ func (e *Enclave) ReleaseDispatch() {
 }
 
 func (e *Enclave) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	r = r.WithContext(withBackendCredentials(r.Context(), e.backendAuth, e.modelName))
 	w.Header().Set("Tinfoil-Enclave", e.host)
 
 	// Check if client requested usage metrics in response header/trailer
@@ -683,7 +687,13 @@ func NewEnclaveManager(configFile []byte, controlPlaneURL string, usageReporterI
 		return nil, err
 	}
 
+	backendAuth, err := loadBackendCredentials(cfg)
+	if err != nil {
+		return nil, err
+	}
+
 	em := &EnclaveManager{
+		backendAuth:          backendAuth,
 		models:               &sync.Map{},
 		initConfigURL:        initConfigURL,
 		updateConfigURL:      updateConfigURL,

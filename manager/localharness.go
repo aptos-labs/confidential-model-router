@@ -39,13 +39,14 @@ func InstallFakeEnclaveForTest(em *EnclaveManager, modelName string, ts *httptes
 		delete(model.Enclaves, existing)
 	}
 	model.installEnclaveLocked(host, &Enclave{
-		host:      host,
-		modelName: modelName,
-		tlsKeyFP:  fp,
-		proxy:     newProxy(host, fp, modelName, em.billingCollector, cb, nil),
-		metrics:   newEnclaveMetrics(host, modelName),
-		cb:        cb,
-		pricing:   em.ModelPricing,
+		backendAuth: em.backendAuth,
+		host:        host,
+		modelName:   modelName,
+		tlsKeyFP:    fp,
+		proxy:       newProxy(host, fp, modelName, em.billingCollector, cb, nil),
+		metrics:     newEnclaveMetrics(host, modelName),
+		cb:          cb,
+		pricing:     em.ModelPricing,
 	})
 	model.mu.Unlock()
 	em.stateMu.Lock()
