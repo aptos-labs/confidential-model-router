@@ -53,13 +53,14 @@ type ReservationConfig struct {
 
 // Model represents the configuration for a single model
 type Model struct {
-	Repo         string              `yaml:"repo"`
-	Hostnames    []string            `yaml:"enclaves"`
-	Overload     *OverloadConfig     `yaml:"overload,omitempty"`
-	RateLimit    *RateLimitConfig    `yaml:"rate_limit,omitempty"`
-	CacheRoute   *CacheRouteConfig   `yaml:"cache_route,omitempty"`
-	CacheSalt    *bool               `yaml:"cache_salt,omitempty"`
-	Reservations []ReservationConfig `yaml:"reservations,omitempty"`
+	BackendAuthEnv string              `yaml:"backend_auth_env,omitempty"`
+	Repo           string              `yaml:"repo"`
+	Hostnames      []string            `yaml:"enclaves"`
+	Overload       *OverloadConfig     `yaml:"overload,omitempty"`
+	RateLimit      *RateLimitConfig    `yaml:"rate_limit,omitempty"`
+	CacheRoute     *CacheRouteConfig   `yaml:"cache_route,omitempty"`
+	CacheSalt      *bool               `yaml:"cache_salt,omitempty"`
+	Reservations   []ReservationConfig `yaml:"reservations,omitempty"`
 }
 
 // OverloadConfig describes optional overload thresholds for a model.

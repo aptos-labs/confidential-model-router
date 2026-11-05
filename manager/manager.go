@@ -29,15 +29,16 @@ import (
 )
 
 type Enclave struct {
-	host      string
-	modelName string
-	tlsKeyFP  string
-	hpkeKey   string
-	predicate attestation.PredicateType
-	proxy     *httputil.ReverseProxy
-	metrics   *enclaveMetrics
-	cb        *circuitBreaker
-	pricing   func(string) (ModelPricing, bool)
+	backendAuth backendCredentials
+	host        string
+	modelName   string
+	tlsKeyFP    string
+	hpkeKey     string
+	predicate   attestation.PredicateType
+	proxy       *httputil.ReverseProxy
+	metrics     *enclaveMetrics
+	cb          *circuitBreaker
+	pricing     func(string) (ModelPricing, bool)
 
 	// inflight counts requests currently proxied through this enclave —
 	// a live load signal, unlike the polled queue depth, which can be up
@@ -154,6 +155,7 @@ func (m *Model) ReservationPools(orgID string) (primary, spill map[string]bool) 
 }
 
 type EnclaveManager struct {
+	backendAuth               backendCredentials
 	models                    *sync.Map // model name -> *Model
 	multimodalModels          sync.Map  // sticky set of multimodal chat model names
 	modelPricing              atomic.Pointer[map[string]ModelPricing]
@@ -356,15 +358,16 @@ func (em *EnclaveManager) addEnclave(
 
 	cb := newCircuitBreaker()
 	model.Enclaves[host] = &Enclave{
-		host:      host,
-		modelName: modelName,
-		predicate: verification.Measurement.Type,
-		tlsKeyFP:  verification.TLSPublicKeyFP,
-		hpkeKey:   verification.HPKEPublicKey,
-		proxy:     newProxy(host, verification.TLSPublicKeyFP, modelName, em.billingCollector, cb),
-		metrics:   newEnclaveMetrics(host, modelName),
-		cb:        cb,
-		pricing:   em.ModelPricing,
+		backendAuth: em.backendAuth,
+		host:        host,
+		modelName:   modelName,
+		predicate:   verification.Measurement.Type,
+		tlsKeyFP:    verification.TLSPublicKeyFP,
+		hpkeKey:     verification.HPKEPublicKey,
+		proxy:       newProxy(host, verification.TLSPublicKeyFP, modelName, em.billingCollector, cb),
+		metrics:     newEnclaveMetrics(host, modelName),
+		cb:          cb,
+		pricing:     em.ModelPricing,
 	}
 	model.Enclaves[host].updateOverloadConfig(model.Overload)
 	CircuitBreakerState.WithLabelValues(modelName, host).Set(float64(cbClosed))
@@ -832,6 +835,7 @@ func (e *Enclave) breakerClosed() bool {
 }
 
 func (e *Enclave) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	r = r.WithContext(withBackendCredentials(r.Context(), e.backendAuth, e.modelName))
 	e.inflight.Add(1)
 	BackendInflight.WithLabelValues(e.modelName, e.host).Inc()
 	defer func() {
@@ -918,12 +922,18 @@ func NewEnclaveManager(configFile []byte, controlPlaneURL string, usageReporterI
 		return nil, err
 	}
 
+	backendAuth, err := loadBackendCredentials(cfg)
+	if err != nil {
+		return nil, err
+	}
+
 	sigstoreClient, err := sigstore.NewClient()
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch trust root: %v", err)
 	}
 
 	em := &EnclaveManager{
+		backendAuth:               backendAuth,
 		models:                    &sync.Map{},
 		initConfigURL:             initConfigURL,
 		updateConfigURL:           updateConfigURL,

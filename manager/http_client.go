@@ -149,6 +149,8 @@ func (em *EnclaveManager) cacheRouteRequest(ctx context.Context, modelName, path
 // so internal dispatches are visible to least-loaded selection like proxied
 // requests are.
 func postToEnclave(ctx context.Context, client *http.Client, enclave *Enclave, path string, body []byte, headers http.Header, claim *ProbeClaim) (*http.Response, error) {
+	ctx = withBackendCredentials(ctx, enclave.backendAuth, enclave.modelName)
+	ctx = withOriginalIdentity(ctx, headers.Get("Authorization"))
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://"+enclave.host+path, bytes.NewReader(body))
 	if err != nil {
 		// The claim resolves through the request's outcome; a request that
@@ -166,6 +168,13 @@ func postToEnclave(ctx context.Context, client *http.Client, enclave *Enclave, p
 		return nil, fmt.Errorf("resolve delegated authorization: %w", err)
 	} else if ok {
 		req.Header.Set("Authorization", authorization)
+	}
+	applyBackendAuthorization(req)
+	// Never replay inference credentials on redirects, including same-origin ones.
+	if enclave.backendAuth.hasModel(enclave.modelName) {
+		copyClient := *client
+		copyClient.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+		client = &copyClient
 	}
 	req.ContentLength = int64(len(body))
 	req.Header.Set("Content-Length", fmt.Sprintf("%d", len(body)))

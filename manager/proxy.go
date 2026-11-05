@@ -209,10 +209,11 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 	// Set the outbound Host header to targetso downstream shims see the original host name.
 	defaultDirector := proxy.Director
 	proxy.Director = func(req *http.Request) {
+		*req = *req.WithContext(withOriginalIdentity(req.Context(), req.Header.Get("Authorization")))
 		defaultDirector(req)
 		req.Host = host
 	}
-	proxy.Transport = transport
+	proxy.Transport = &backendAuthTripper{base: transport}
 	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
 		// A body-limit trip during the outbound copy (chunked uploads pass
 		// the router's Content-Length pre-check) is a client fault: answer
@@ -274,7 +275,7 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 
 		// Extract request details that we'll need for billing
 		req := resp.Request
-		authHeader := req.Header.Get("Authorization")
+		authHeader, _ := req.Context().Value(originalIdentityKey{}).(string)
 		userID := ""
 		apiKey := ""
 		if authHeader != "" {
