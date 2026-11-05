@@ -30,10 +30,13 @@ func loadBackendCredentials(cfg *config.Config) (backendCredentials, error) {
 		if c.BackendAuthEnv == "" {
 			continue
 		}
+		if len(c.Hostnames) == 0 {
+			return nil, fmt.Errorf("model %s: backend_auth_env requires an enclave hostname", model)
+		}
 		value, ok := values[c.BackendAuthEnv]
 		if !ok {
 			value = os.Getenv(c.BackendAuthEnv)
-			if strings.TrimSpace(value) == "" || strings.ContainsAny(value, "\r\n") {
+			if value == "" || strings.TrimSpace(value) != value || len(value) > 512 || strings.IndexFunc(value, func(r rune) bool { return r < 33 || r > 126 }) >= 0 {
 				return nil, fmt.Errorf("model %s: backend_auth_env %s must contain a nonempty bearer credential", model, c.BackendAuthEnv)
 			}
 			values[c.BackendAuthEnv] = value

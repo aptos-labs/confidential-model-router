@@ -78,3 +78,47 @@ Client side tool calling is handled by the client. Server-side tools currently s
 To handle prompting, we add some instructions about how to call each tool in the system prompt, and we have a short description in each tool.
 
 _vLLM handles putting the system prompt + the tool prompts together, using internal templates built for the specific models._
+
+## Backend inference authentication
+
+A model can opt into a backend-only bearer credential in runtime YAML:
+
+```yaml
+models:
+  private-model:
+    repo: owner/model
+    enclaves: [inference.example.com:443]
+    backend_auth_env: PRIVATE_MODEL_BACKEND_TOKEN
+    # Existing per-model cache isolation override remains independent:
+    cache_salt: true
+```
+
+Inject `PRIVATE_MODEL_BACKEND_TOKEN` into the router process using your deployment's
+secret mechanism. Its value is the **raw token**, without a `Bearer ` prefix.
+Do not put the token in YAML, command-line arguments, or source control. Startup
+fails before attestation if a referenced variable is unset, empty/whitespace-only,
+or contains CR/LF; errors identify the model and variable, not the token.
+
+Credentials are snapshotted once at startup, scoped to the configured model and
+exact HTTPS host (including an explicit port). A different model sharing a host,
+a different host/port, or plaintext HTTP does not receive this credential. Restart
+with updated configuration/environment to rotate tokens or authorize new hosts;
+runtime configuration refresh does not expand the startup credential snapshot.
+Omitting `backend_auth_env` preserves existing caller/delegated authorization.
+
+The credential replaces only the outbound `Authorization` on proxied inference
+and internal `DoModelRequest`/`DoModelRequestJSON` dispatches (including tool-loop
+model calls). Delegated authorization is still resolved first, and its failures
+still fail the request. The incoming customer's identity remains the source for
+billing, route-context/reservation lookup, admission/rate limits, and cache-salt
+partitioning. Client-supplied original-identity headers are not trusted. Internal
+callers remain responsible for their own billing. MCP sessions and debug endpoint
+overrides are not covered by this option.
+
+Internal inference requests for opted-in models do not follow redirects, even to
+the same origin; they return the 3xx response to the caller. The reverse proxy
+also returns redirects without following them. This avoids replaying the backend
+token at redirect destinations. Backend metrics polling continues to use its
+separate `--metrics-api-key` / `METRICS_API_KEY` monitoring credential; it never
+uses `backend_auth_env`. Configure the inference token and metrics token with
+separate privileges. This option does not alter attestation or TLS pinning.

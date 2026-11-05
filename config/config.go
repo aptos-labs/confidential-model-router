@@ -53,6 +53,9 @@ type ReservationConfig struct {
 
 // Model represents the configuration for a single model
 type Model struct {
+	// BackendAuthEnv names an environment variable containing a raw backend
+	// bearer token. Resolved once at startup for this model's configured hosts;
+	// omitted preserves the caller/delegated Authorization behavior.
 	BackendAuthEnv string              `yaml:"backend_auth_env,omitempty"`
 	Repo           string              `yaml:"repo"`
 	Hostnames      []string            `yaml:"enclaves"`

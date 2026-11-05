@@ -2,9 +2,17 @@ package manager
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"math/big"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -15,6 +23,7 @@ import (
 	"github.com/tinfoilsh/confidential-model-router/billing"
 	"github.com/tinfoilsh/confidential-model-router/config"
 	"github.com/tinfoilsh/tinfoil-go/verifier/attestation"
+	tinfoilClient "github.com/tinfoilsh/tinfoil-go/verifier/client"
 	usagereporting "github.com/tinfoilsh/usage-reporting-go"
 )
 
@@ -41,6 +50,109 @@ func testBackendCredentials(t *testing.T, host string) backendCredentials {
 	return credentials
 }
 
+func newBackendTLSServer(t *testing.T, handler http.Handler) *httptest.Server {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	certificate := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		DNSNames:     []string{"localhost"},
+		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1")},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, certificate, certificate, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewUnstartedServer(handler)
+	server.TLS = &tls.Config{
+		MinVersion:   tls.VersionTLS12,
+		Certificates: []tls.Certificate{{Certificate: [][]byte{der}, PrivateKey: key}},
+	}
+	server.StartTLS()
+	return server
+}
+
+// trustBackendTLSFixture is only for sequential tests: the pinned transport
+// clones http.DefaultTransport on first use. Give that clone a test-only trust
+// root, retaining normal certificate/hostname verification and its pin check.
+// Never mutate the original transport or install roots outside this test.
+func trustBackendTLSFixture(t *testing.T, server *httptest.Server) {
+	t.Helper()
+	original := http.DefaultTransport
+	transport := original.(*http.Transport).Clone()
+	if transport.TLSClientConfig == nil {
+		transport.TLSClientConfig = &tls.Config{}
+	}
+	roots := transport.TLSClientConfig.RootCAs
+	if roots == nil {
+		roots = x509.NewCertPool()
+	} else {
+		roots = roots.Clone()
+	}
+	roots.AddCert(server.Certificate())
+	transport.TLSClientConfig.RootCAs = roots
+	http.DefaultTransport = transport
+	t.Cleanup(func() {
+		http.DefaultTransport = original
+		transport.CloseIdleConnections()
+	})
+}
+
+func TestBackendTLSFixtureVerification(t *testing.T) {
+	server := newBackendTLSServer(t, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer server.Close()
+	fp := testBackendFingerprint(t, server)
+	original := http.DefaultTransport
+	for _, name := range []string{"trusted", "wrong-pin", "unknown-ca", "wrong-hostname"} {
+		t.Run(name, func(t *testing.T) {
+			if name != "unknown-ca" {
+				trustBackendTLSFixture(t, server)
+			}
+			if name == "wrong-hostname" {
+				http.DefaultTransport.(*http.Transport).TLSClientConfig.ServerName = "untrusted.example"
+			}
+			expectedPin := fp
+			if name == "wrong-pin" {
+				expectedPin = "wrong-pin"
+			}
+			client := &http.Client{Transport: &tinfoilClient.TLSBoundRoundTripper{ExpectedPublicKey: expectedPin}}
+			resp, err := client.Get(server.URL)
+			if resp != nil {
+				resp.Body.Close()
+			}
+			switch name {
+			case "trusted":
+				if err != nil {
+					t.Fatal(err)
+				}
+			case "wrong-pin":
+				if !errors.Is(err, tinfoilClient.ErrCertMismatch) {
+					t.Fatalf("expected pin mismatch, got %v", err)
+				}
+			case "unknown-ca":
+				var unknownCA x509.UnknownAuthorityError
+				if !errors.As(err, &unknownCA) {
+					t.Fatalf("expected untrusted certificate rejection, got %v", err)
+				}
+			case "wrong-hostname":
+				var hostnameError x509.HostnameError
+				if !errors.As(err, &hostnameError) {
+					t.Fatalf("expected hostname rejection, got %v", err)
+				}
+			}
+		})
+		if http.DefaultTransport != original {
+			t.Fatal("fixture trust changed the default transport after cleanup")
+		}
+	}
+}
+
 func testBackendFingerprint(t *testing.T, server *httptest.Server) string {
 	t.Helper()
 	resp, err := server.Client().Get(server.URL + "/health")
@@ -48,7 +160,11 @@ func testBackendFingerprint(t *testing.T, server *httptest.Server) string {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
-	return attestation.ConnectionCertFP(*resp.TLS)
+	fp, err := attestation.ConnectionCertFP(*resp.TLS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return fp
 }
 
 func TestBackendAuthStartupFailsClosed(t *testing.T) {
@@ -71,7 +187,7 @@ func TestBackendAuthProxyBilling(t *testing.T) {
 		for _, model := range []string{"selected", "other"} {
 			t.Run(fmt.Sprintf("%s/streaming-%t", model, streaming), func(t *testing.T) {
 				auths := make(chan string, 1)
-				upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				upstream := newBackendTLSServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					if r.URL.Path == "/health" {
 						return
 					}
@@ -87,6 +203,7 @@ func TestBackendAuthProxyBilling(t *testing.T) {
 					}
 				}))
 				defer upstream.Close()
+				trustBackendTLSFixture(t, upstream)
 				host := strings.TrimPrefix(upstream.URL, "https://")
 				batches := make(chan usagereporting.Batch, 2)
 				control := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -148,7 +265,7 @@ func TestBackendAuthProxyBilling(t *testing.T) {
 
 func TestBackendAuthInternalModelRequests(t *testing.T) {
 	auths := make(chan string, 8)
-	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	upstream := newBackendTLSServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/health" {
 			return
 		}
@@ -156,6 +273,7 @@ func TestBackendAuthInternalModelRequests(t *testing.T) {
 		fmt.Fprint(w, "{}")
 	}))
 	defer upstream.Close()
+	trustBackendTLSFixture(t, upstream)
 	host := strings.TrimPrefix(upstream.URL, "https://")
 	credentials := testBackendCredentials(t, host)
 	em := &EnclaveManager{models: &sync.Map{}, backendAuth: credentials}
@@ -199,9 +317,9 @@ func TestBackendAuthInternalModelRequests(t *testing.T) {
 
 func TestBackendAuthOriginScopeAndRedirect(t *testing.T) {
 	leaks := make(chan string, 2)
-	other := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { leaks <- r.Header.Get("Authorization") }))
+	other := newBackendTLSServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { leaks <- r.Header.Get("Authorization") }))
 	defer other.Close()
-	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	upstream := newBackendTLSServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, other.URL, http.StatusTemporaryRedirect)
 	}))
 	defer upstream.Close()
@@ -229,5 +347,58 @@ func TestBackendAuthOriginScopeAndRedirect(t *testing.T) {
 	case <-leaks:
 		t.Fatal("redirect destination contacted")
 	default:
+	}
+}
+
+func TestBackendAuthMetricsCredentialsSeparate(t *testing.T) {
+	old, _ := pollAPIKey.Load().(string)
+	defer SetMetricsPollAPIKey(old)
+	SetMetricsPollAPIKey("metrics-test")
+	auths := make(chan string, 1)
+	server := newBackendTLSServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		auths <- r.Header.Get("Authorization")
+		fmt.Fprintln(w, "vllm:num_requests_waiting 0")
+	}))
+	defer server.Close()
+	host := strings.TrimPrefix(server.URL, "https://")
+	credentials := testBackendCredentials(t, host)
+	m := newEnclaveMetrics(host, "selected")
+	m.client = server.Client()
+	m.scrape(withBackendCredentials(context.Background(), credentials, "selected"))
+	if <-auths != "Bearer metrics-test" {
+		t.Fatal("metrics credential replaced by inference credential")
+	}
+}
+
+func TestBackendAuthInvalidTargets(t *testing.T) {
+	t.Setenv("ROUTER_TEST_BACKEND_AUTH", "backend-test")
+	for _, host := range []string{"", "user@host.example", "host.example/path", "host.example?query", "host.example#fragment"} {
+		cfg := &config.Config{Models: map[string]config.Model{"selected": {BackendAuthEnv: "ROUTER_TEST_BACKEND_AUTH", Hostnames: []string{host}}}}
+		if _, err := loadBackendCredentials(cfg); err == nil {
+			t.Fatalf("accepted invalid target %q", host)
+		}
+	}
+}
+
+func TestBackendAuthSameOriginRedirect(t *testing.T) {
+	calls := 0
+	server := newBackendTLSServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		http.Redirect(w, r, "/redirected", http.StatusTemporaryRedirect)
+	}))
+	defer server.Close()
+	host := strings.TrimPrefix(server.URL, "https://")
+	e := &Enclave{host: host, modelName: "selected", backendAuth: testBackendCredentials(t, host)}
+	client := server.Client()
+	resp, err := postToEnclave(context.Background(), client, e, "/v1/chat/completions", nil, http.Header{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusTemporaryRedirect || calls != 1 {
+		t.Fatal("same-origin redirect followed")
+	}
+	if client.CheckRedirect != nil {
+		t.Fatal("shared client mutated")
 	}
 }
