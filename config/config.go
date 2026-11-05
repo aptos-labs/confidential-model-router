@@ -48,6 +48,9 @@ type ReservationConfig struct {
 // owned by the control plane; a `rate_limit` key in runtime YAML is ignored
 // like any other unknown key.
 type Model struct {
+	// BackendAuthEnv names an environment variable containing a raw backend
+	// bearer token. Resolved once at startup for this model's configured hosts;
+	// omitted preserves the caller/delegated Authorization behavior.
 	BackendAuthEnv string              `yaml:"backend_auth_env,omitempty"`
 	Repo           string              `yaml:"repo"`
 	Hostnames      []string            `yaml:"enclaves"`
