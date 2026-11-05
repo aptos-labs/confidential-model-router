@@ -48,11 +48,12 @@ type ReservationConfig struct {
 // owned by the control plane; a `rate_limit` key in runtime YAML is ignored
 // like any other unknown key.
 type Model struct {
-	Repo         string              `yaml:"repo"`
-	Hostnames    []string            `yaml:"enclaves"`
-	Overload     *OverloadConfig     `yaml:"overload,omitempty"`
-	CacheRoute   *CacheRouteConfig   `yaml:"cache_route,omitempty"`
-	Reservations []ReservationConfig `yaml:"reservations,omitempty"`
+	BackendAuthEnv string              `yaml:"backend_auth_env,omitempty"`
+	Repo           string              `yaml:"repo"`
+	Hostnames      []string            `yaml:"enclaves"`
+	Overload       *OverloadConfig     `yaml:"overload,omitempty"`
+	CacheRoute     *CacheRouteConfig   `yaml:"cache_route,omitempty"`
+	Reservations   []ReservationConfig `yaml:"reservations,omitempty"`
 }
 
 // OverloadConfig describes optional overload thresholds for a model.
