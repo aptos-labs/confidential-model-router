@@ -64,6 +64,18 @@ type Model struct {
 	CacheRoute     *CacheRouteConfig   `yaml:"cache_route,omitempty"`
 	CacheSalt      *bool               `yaml:"cache_salt,omitempty"`
 	Reservations   []ReservationConfig `yaml:"reservations,omitempty"`
+	// HealthProbePath is the enclave's unauthenticated health endpoint, for
+	// example "/health". When set, an enclave whose circuit breaker is not
+	// closed gets a live recovery probe only after this endpoint answered
+	// 200, and a new enclave that does not answer 200 joins with an open
+	// breaker. Omitted keeps the original behavior: the recovery probe is
+	// the next client request after the cooldown.
+	HealthProbePath string `yaml:"health_probe_path,omitempty"`
+	// Balance selects how a request without a cache-aware pick chooses
+	// among healthy, non-overloaded enclaves: "random" (default) or
+	// "least_inflight" (fewest requests in flight at this router, ties at
+	// random).
+	Balance string `yaml:"balance,omitempty"`
 }
 
 // OverloadConfig describes optional overload thresholds for a model.

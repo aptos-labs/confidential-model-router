@@ -53,14 +53,16 @@ func requestOutcome(ctx context.Context, status int, aborted bool) string {
 // unwinds the handler with http.ErrAbortHandler and that request's
 // duration must still be recorded. Non-streaming paths have no writer
 // wrapper and pass status 0: their outcome classifies from context and
-// abort state only, so a relayed backend error still lands in "ok".
-func observeRequestDuration(ctx context.Context, model, pool, class string, streaming bool, status int, aborted bool, start time.Time) {
+// abort state only, so a relayed backend error still lands in "ok". enclave
+// is the host that served the request, or "none" when no single host did
+// (the tool runtime dispatches internally).
+func observeRequestDuration(ctx context.Context, model, pool, class string, streaming bool, status int, aborted bool, start time.Time, enclave string) {
 	stream := "non_streaming"
 	if streaming {
 		stream = "streaming"
 	}
 	manager.RequestDurationSeconds.
-		WithLabelValues(model, pool, class, stream, requestOutcome(ctx, status, aborted)).
+		WithLabelValues(model, pool, class, stream, requestOutcome(ctx, status, aborted), enclave).
 		Observe(time.Since(start).Seconds())
 }
 

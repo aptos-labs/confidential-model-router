@@ -143,3 +143,34 @@ models:
 		t.Fatalf("plain CacheSalt = %v, want nil", cfg.Models["plain"].CacheSalt)
 	}
 }
+
+func TestMultiEnclaveOptionsParse(t *testing.T) {
+	cfg, err := FromBytes([]byte(`
+models:
+  two-hosts:
+    repo: owner/model
+    enclaves: [a.example.com, b.example.com]
+    health_probe_path: /health
+    balance: least_inflight
+    cache_route:
+      mode: enforced
+      max_inflight_delta: 2
+  defaults:
+    repo: owner/other
+    enclaves: [c.example.com]
+`))
+	if err != nil {
+		t.Fatalf("FromBytes: %v", err)
+	}
+	two := cfg.Models["two-hosts"]
+	if two.HealthProbePath != "/health" || two.Balance != "least_inflight" {
+		t.Fatalf("two-hosts: health_probe_path=%q balance=%q", two.HealthProbePath, two.Balance)
+	}
+	if two.CacheRoute == nil || two.CacheRoute.MaxInflightDelta == nil || *two.CacheRoute.MaxInflightDelta != 2 {
+		t.Fatalf("two-hosts: max_inflight_delta not parsed: %+v", two.CacheRoute)
+	}
+	// Omitted options keep the original behavior.
+	if d := cfg.Models["defaults"]; d.HealthProbePath != "" || d.Balance != "" {
+		t.Fatalf("defaults: health_probe_path=%q balance=%q, want both empty", d.HealthProbePath, d.Balance)
+	}
+}

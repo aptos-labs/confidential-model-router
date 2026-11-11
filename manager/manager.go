@@ -38,6 +38,7 @@ type Enclave struct {
 	proxy       *httputil.ReverseProxy
 	metrics     *enclaveMetrics
 	cb          *circuitBreaker
+	health      *healthGate // nil when the model has no health_probe_path
 	pricing     func(string) (ModelPricing, bool)
 
 	// inflight counts requests currently proxied through this enclave —
@@ -61,6 +62,9 @@ type Model struct {
 	Reservations []config.ReservationConfig `json:"-"`
 
 	expectedHosts int // number of configured hostnames; 0 means no backends expected
+
+	healthProbePath string // config health_probe_path; "" disables the health gate
+	leastInflight   bool   // config balance: least_inflight
 
 	// Derived from Reservations (see applyReservations); replaced wholesale
 	// and never mutated after publish, so safe to return under RLock.
@@ -320,6 +324,7 @@ func (em *EnclaveManager) addEnclave(
 	if exists {
 		currentFP = currentEnclave.tlsKeyFP
 	}
+	healthProbePath := model.healthProbePath
 	model.mu.RUnlock()
 	if exists {
 		realTLSKeyFP, err := tlsPublicKeyFP(host)
@@ -344,6 +349,17 @@ func (em *EnclaveManager) addEnclave(
 		}
 	}
 
+	// An attested enclave can still be loading its model. With a health
+	// gate it joins with an open breaker until its health endpoint answers,
+	// so no client request is sent to it first. Network I/O: done before
+	// the model lock is taken.
+	var gate *healthGate
+	ready := true
+	if healthProbePath != "" {
+		gate = newHealthGate(host, healthProbePath, verification.TLSPublicKeyFP)
+		ready = gate.check(context.Background())
+	}
+
 	model.mu.Lock()
 	defer model.mu.Unlock()
 
@@ -357,6 +373,14 @@ func (em *EnclaveManager) addEnclave(
 	}
 
 	cb := newCircuitBreaker()
+	if !ready {
+		cb.startOpen()
+		log.WithFields(log.Fields{"model": modelName, "enclave": host}).
+			Warn("enclave attested but its health endpoint does not answer 200: joining with an open breaker")
+	}
+	if previous := model.Enclaves[host]; previous != nil {
+		previous.health.shutdown()
+	}
 	model.Enclaves[host] = &Enclave{
 		backendAuth: em.backendAuth,
 		host:        host,
@@ -367,10 +391,14 @@ func (em *EnclaveManager) addEnclave(
 		proxy:       newProxy(host, verification.TLSPublicKeyFP, modelName, em.billingCollector, cb),
 		metrics:     newEnclaveMetrics(host, modelName),
 		cb:          cb,
+		health:      gate,
 		pricing:     em.ModelPricing,
 	}
 	model.Enclaves[host].updateOverloadConfig(model.Overload)
-	CircuitBreakerState.WithLabelValues(modelName, host).Set(float64(cbClosed))
+	CircuitBreakerState.WithLabelValues(modelName, host).Set(float64(cb.State()))
+	if gate != nil {
+		go gate.run(cb, modelName, host)
+	}
 	return nil
 }
 
@@ -475,6 +503,11 @@ func (e *Enclave) claimProbe() *ProbeClaim {
 	if e.cb == nil {
 		return nil
 	}
+	// With a health gate, a client request probes the enclave only after
+	// its health endpoint answered.
+	if !e.health.Passing() {
+		return nil
+	}
 	token, ok := e.cb.ClaimProbe()
 	if !ok {
 		return nil
@@ -525,13 +558,122 @@ func (m *Model) nextEnclave(skip map[string]bool, claimProbes bool, allowed map[
 
 	switch {
 	case len(preferred) > 0:
-		return preferred[rand.IntN(len(preferred))], nil
+		return m.pick(preferred), nil
 	case len(closed) > 0:
-		return closed[rand.IntN(len(closed))], nil
+		return m.pick(closed), nil
 	case len(all) > 0:
 		return all[rand.IntN(len(all))], nil
 	}
 	return nil, nil
+}
+
+// pick chooses among healthy candidates: uniformly at random, or with
+// balance least_inflight the one with the fewest requests in flight at this
+// router (ties at random). In-flight count is the only load signal that
+// rises at once when an enclave is busy with a long prefill: the polled
+// queue depth stays far below the overload mark in that case.
+func (m *Model) pick(candidates []*Enclave) *Enclave {
+	if !m.leastInflight || len(candidates) == 1 {
+		return candidates[rand.IntN(len(candidates))]
+	}
+	best := candidates[:0:0]
+	least := int64(-1)
+	for _, enclave := range candidates {
+		load := enclave.inflight.Load()
+		switch {
+		case least < 0 || load < least:
+			least = load
+			best = append(best[:0], enclave)
+		case load == least:
+			best = append(best, enclave)
+		}
+	}
+	return best[rand.IntN(len(best))]
+}
+
+// setHealthProbePath applies a changed health_probe_path to the model and to
+// the enclaves it already has: each gets a fresh gate, or loses its gate when
+// the path is removed. A fresh gate has not passed yet, so an enclave whose
+// breaker is open waits for one health check before its next live probe.
+// The caller must hold m.mu.
+func (m *Model) setHealthProbePath(modelName, path string) {
+	if path == m.healthProbePath {
+		return
+	}
+	m.healthProbePath = path
+	for host, enclave := range m.Enclaves {
+		enclave.health.shutdown()
+		enclave.health = nil
+		if path != "" {
+			enclave.health = newHealthGate(host, path, enclave.tlsKeyFP)
+			go enclave.health.run(enclave.cb, modelName, host)
+		}
+	}
+}
+
+// narrowed returns the allowed-host filter without the excluded hosts. A nil
+// allowed means every enclave of the model.
+func (m *Model) narrowed(allowed, exclude map[string]bool) map[string]bool {
+	if len(exclude) == 0 {
+		return allowed
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := make(map[string]bool, len(m.Enclaves))
+	for host := range m.Enclaves {
+		if exclude[host] || (allowed != nil && !allowed[host]) {
+			continue
+		}
+		out[host] = true
+	}
+	return out
+}
+
+// SelectServingExcluding is SelectServing without the excluded hosts: the
+// enclaves that already failed this request before any response byte
+// reached the client. The exclusion is hard, like a reservation filter, so
+// an excluded host is not picked as a last resort or for a recovery probe.
+func (m *Model) SelectServingExcluding(order []string, primary, spill, exclude map[string]bool) (enclave *Enclave, claim *ProbeClaim, overloaded bool, retryAfter time.Duration, waiting float64) {
+	if len(exclude) == 0 {
+		return m.SelectServing(order, primary, spill)
+	}
+	if len(spill) > 0 {
+		spill = m.narrowed(spill, exclude)
+	}
+	return m.SelectServing(order, m.narrowed(primary, exclude), spill)
+}
+
+// SelectForDispatchPoolsExcluding is SelectForDispatchPools without the
+// excluded hosts (see SelectServingExcluding).
+func (m *Model) SelectForDispatchPoolsExcluding(order []string, primary, spill, exclude map[string]bool) (*Enclave, *ProbeClaim) {
+	if len(exclude) == 0 {
+		return m.SelectForDispatchPools(order, primary, spill)
+	}
+	if len(spill) > 0 {
+		spill = m.narrowed(spill, exclude)
+	}
+	return m.SelectForDispatchPools(order, m.narrowed(primary, exclude), spill)
+}
+
+// HasOtherServingEnclave reports whether an enclave other than current, not
+// excluded and inside the caller's pools (nil primary = all enclaves), has a
+// closed breaker. The handler allows a retry only then, so a failure on the
+// last usable host still reaches the client as the backend sent it.
+func (m *Model) HasOtherServingEnclave(current string, primary, spill, exclude map[string]bool) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for host, enclave := range m.Enclaves {
+		if host == current || exclude[host] {
+			continue
+		}
+		if primary != nil && !primary[host] && !spill[host] {
+			continue
+		}
+		if enclave.breakerClosed() {
+			return true
+		}
+	}
+	return false
 }
 
 // NextEnclavePreferring picks like NextEnclave, but serves the first
@@ -969,6 +1111,8 @@ func (em *EnclaveManager) addModel(modelName string, modelConfig config.Model) {
 		CacheRoute:        modelConfig.CacheRoute,
 		CacheSalt:         modelConfig.CacheSalt,
 		expectedHosts:     len(modelConfig.Hostnames),
+		healthProbePath:   modelConfig.HealthProbePath,
+		leastInflight:     modelConfig.Balance == "least_inflight",
 	}
 	model.applyReservations(modelName, modelConfig.Reservations, modelConfig.Hostnames)
 	em.models.Store(modelName, model)
@@ -1081,6 +1225,8 @@ func (em *EnclaveManager) sync() error {
 			model.RateLimit = configModel.RateLimit
 			model.CacheRoute = configModel.CacheRoute
 			model.CacheSalt = configModel.CacheSalt
+			model.leastInflight = configModel.Balance == "least_inflight"
+			model.setHealthProbePath(modelName, configModel.HealthProbePath)
 			model.applyReservations(modelName, configModel.Reservations, configModel.Hostnames)
 			for _, enclave := range model.Enclaves {
 				enclave.updateOverloadConfig(model.Overload)
@@ -1163,6 +1309,7 @@ func (e *Enclave) shutdown() {
 	if e.metrics != nil {
 		e.metrics.shutdown()
 	}
+	e.health.shutdown()
 	if e.cb != nil {
 		e.cb.Retire()
 	}

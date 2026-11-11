@@ -40,6 +40,15 @@ func newCircuitBreaker() *circuitBreaker {
 	return &circuitBreaker{}
 }
 
+// startOpen puts a new breaker into the open state with its cooldown already
+// elapsed: for an enclave that joined the pool before it could serve. Its
+// first live probe is allowed as soon as the health gate passes.
+func (cb *circuitBreaker) startOpen() {
+	cb.consecutiveFailures.Store(cbFailureThreshold)
+	cb.lastFailureNano.Store(time.Now().Add(-cbCooldown).UnixNano())
+	cb.storeState(cbOpen)
+}
+
 func (cb *circuitBreaker) loadState() cbState {
 	return cbState(cb.state.Load())
 }
