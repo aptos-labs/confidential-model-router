@@ -576,6 +576,11 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 		// the TTFT / inter-token SLA observation at dispatch.
 		isStreaming := false
 
+		// The buffered request body, when the router read it whole. Only
+		// such a request can be dispatched to a second enclave.
+		var replayBody []byte
+		replayable := false
+
 		// The caller's org from route-context; only consulted for models
 		// with enclave reservations.
 		callerOrgID := ""
@@ -749,6 +754,7 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 					modelName = "qwen3-tts"
 				}
 				r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+				replayBody, replayable = bodyBytes, true
 			} else if r.URL.Path == "/v1/audio/transcriptions" || strings.HasPrefix(r.URL.Path, "/v1/audio/") {
 				// Extract model from multipart form, default to voxtral-small-24b
 				var bodyBytes []byte
@@ -766,6 +772,7 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 					modelName = "voxtral-small-24b"
 				}
 				r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+				replayBody, replayable = bodyBytes, true
 			} else if r.URL.Path == "/v1/convert/file" {
 				modelName = "doc-upload"
 			} else { // This is an OpenAI-compatible API request
@@ -932,6 +939,7 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 
 				r.Body.Close()
 				r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+				replayBody, replayable = bodyBytes, true
 
 				if len(activeProfiles) > 0 || hasAutoContinueTools {
 					// Streaming tool requests feed the same first-token SLA
@@ -948,11 +956,11 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 						defer func() {
 							lw.aborted = !toolServed
 							lw.finish(r.Context())
-							observeRequestDuration(r.Context(), modelName, toolRuntimeLabel, lw.class, true, lw.status, lw.aborted, requestStart)
+							observeRequestDuration(r.Context(), modelName, toolRuntimeLabel, lw.class, true, lw.status, lw.aborted, requestStart, "none")
 						}()
 					} else {
 						defer func() {
-							observeRequestDuration(r.Context(), modelName, toolRuntimeLabel, priorityClass(hasConfiguredPriority), false, 0, !toolServed, requestStart)
+							observeRequestDuration(r.Context(), modelName, toolRuntimeLabel, priorityClass(hasConfiguredPriority), false, 0, !toolServed, requestStart, "none")
 						}()
 					}
 					if err := toolruntime.Handle(tw, r, em, activeProfiles, body, modelName, routerOpts); err != nil {
@@ -1093,136 +1101,185 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 			}
 		}
 
-		var (
-			enclave    *manager.Enclave
-			probeClaim *manager.ProbeClaim
-			overloaded bool
-			retryAfter time.Duration
-			waiting    float64
-		)
-		if hasConfiguredPriority {
-			// Configured-priority callers have no 429 path: like internal
-			// dispatches they serve through overload at the warmest host,
-			// where JSON requests carry an injected backend priority. Video
-			// uses the same admission exemption, but never mutates its form.
-			enclave, probeClaim = model.SelectForDispatchPools(cacheRouteOrder, poolPrimary, poolSpill)
-			if enclave != nil && probeClaim == nil {
-				if ov, _, _ := enclave.ShouldReject(); ov {
-					manager.PriorityOverloadAdmitsTotal.WithLabelValues(modelName).Inc()
+		// A request whose body the router buffered can be dispatched again
+		// when an enclave fails before any response byte reaches the client
+		// (see manager.DispatchAttempt). failedHosts collects the enclaves
+		// that failed this request that way.
+		failedHosts := map[string]bool{}
+		for {
+			var (
+				enclave    *manager.Enclave
+				probeClaim *manager.ProbeClaim
+				overloaded bool
+				retryAfter time.Duration
+				waiting    float64
+			)
+			if hasConfiguredPriority {
+				// Configured-priority callers have no 429 path: like internal
+				// dispatches they serve through overload at the warmest host,
+				// where JSON requests carry an injected backend priority. Video
+				// uses the same admission exemption, but never mutates its form.
+				enclave, probeClaim = model.SelectForDispatchPoolsExcluding(cacheRouteOrder, poolPrimary, poolSpill, failedHosts)
+				if enclave != nil && probeClaim == nil {
+					if ov, _, _ := enclave.ShouldReject(); ov {
+						manager.PriorityOverloadAdmitsTotal.WithLabelValues(modelName).Inc()
+					}
+				}
+			} else {
+				enclave, probeClaim, overloaded, retryAfter, waiting = model.SelectServingExcluding(cacheRouteOrder, poolPrimary, poolSpill, failedHosts)
+			}
+			if enclave == nil {
+				if len(failedHosts) > 0 {
+					// The other enclave left the pool after the failed
+					// attempt: answer as the proxy would have.
+					jsonError(w, manager.ErrMsgServerError, manager.ErrTypeServer, http.StatusBadGateway)
+					return
+				}
+				jsonError(w, manager.ErrMsgOverloaded, manager.ErrTypeServer, http.StatusServiceUnavailable)
+				return
+			}
+
+			// Meter landing pools on reserved models; poolSpill is only
+			// non-nil for reserved callers. Models without reservations have
+			// no pool concept and carry "none" on the SLA metrics.
+			poolLabel := "none"
+			if poolPrimary != nil && !overloaded {
+				poolLabel = "shared"
+				if poolSpill != nil {
+					if poolPrimary[enclave.String()] {
+						poolLabel = "reserved"
+					} else {
+						poolLabel = "spilled"
+						log.WithFields(log.Fields{
+							"model":   modelName,
+							"enclave": enclave.String(),
+						}).Debug("reserved pool exhausted; spilling to shared pool")
+					}
+				}
+				manager.ReservedPoolServesTotal.WithLabelValues(modelName, poolLabel).Inc()
+			}
+
+			if overloaded {
+				secs := int(retryAfter.Seconds())
+				if secs <= 0 {
+					secs = 60
+				}
+				w.Header().Set("Retry-After", strconv.Itoa(secs))
+				fields := log.Fields{
+					"model":               modelName,
+					"enclave":             enclave.String(),
+					"requests_waiting":    waiting,
+					"retry_after_seconds": secs,
+				}
+				// With hysteresis, requests_waiting can sit below the trip mark
+				// while the queue drains; log the marks so an in-band reject
+				// doesn't read as a contradiction.
+				if trip, clear, ok := enclave.OverloadMarks(); ok {
+					fields["max_requests_waiting"] = trip
+					fields["clear_requests_waiting"] = clear
+				}
+				log.WithFields(fields).Warn("rejecting request due to backend overload")
+
+				// Record rejection metrics
+				manager.RequestsRejectedTotal.WithLabelValues(modelName).Inc()
+				manager.RetryAfterSeconds.WithLabelValues(modelName).Observe(float64(secs))
+
+				jsonError(w, fmt.Sprintf("Request rate exceeded. Retry after %d seconds.", secs), manager.ErrTypeInvalidRequest, http.StatusTooManyRequests)
+				return
+			}
+
+			log.Debugf("%s serving request\n", enclave)
+
+			firstAttempt := len(failedHosts) == 0
+			if firstAttempt {
+				// Everything between arrival and here — body handling, route-context
+				// lookup, rate limiting, selection — is router overhead; isolate it
+				// so backend latency and router latency stay attributable.
+				manager.DispatchSeconds.WithLabelValues(modelName).Observe(time.Since(requestStart).Seconds())
+
+				// Hand the landing to the cache-route pipeline. Observed at
+				// dispatch so the picked replica counts as warm from prefill
+				// start; cannot affect the request. A retry is not observed:
+				// its first landing already was, and the key keeps its home.
+				if cacheRouteDecision != nil {
+					cacheRouteShadow.ObserveLanding(modelName, cacheRouteReq, cacheRouteDecision, enclave.String(), cacheRouteSettings)
+				} else if cacheRouteReq != nil {
+					cacheRouteShadow.Observe(modelName, cacheRouteReq, model.CacheRoutePoolIn(poolPrimary), enclave.String(), cacheRouteSettings)
 				}
 			}
-		} else {
-			enclave, probeClaim, overloaded, retryAfter, waiting = model.SelectServing(cacheRouteOrder, poolPrimary, poolSpill)
-		}
-		if enclave == nil {
-			jsonError(w, manager.ErrMsgOverloaded, manager.ErrTypeServer, http.StatusServiceUnavailable)
-			return
-		}
 
-		// Meter landing pools on reserved models; poolSpill is only
-		// non-nil for reserved callers. Models without reservations have
-		// no pool concept and carry "none" on the SLA metrics.
-		poolLabel := "none"
-		if poolPrimary != nil && !overloaded {
-			poolLabel = "shared"
-			if poolSpill != nil {
-				if poolPrimary[enclave.String()] {
-					poolLabel = "reserved"
-				} else {
-					poolLabel = "spilled"
-					log.WithFields(log.Fields{
-						"model":   modelName,
-						"enclave": enclave.String(),
-					}).Debug("reserved pool exhausted; spilling to shared pool")
+			// The proxy may hand the request back only when the body can be
+			// replayed and another enclave can take it. Otherwise the
+			// backend's own failure reaches the client, as before.
+			attempt := &manager.DispatchAttempt{}
+			if replayable && !isWebSocketUpgrade(r) {
+				attempt.AllowRetry = model.HasOtherServingEnclave(enclave.String(), poolPrimary, poolSpill, failedHosts)
+			}
+			req := r.WithContext(manager.WithDispatchAttempt(r.Context(), attempt))
+
+			// A claimed recovery probe travels with its request, so the
+			// enclave's outcome handlers can tell an owner's cancellation
+			// (which must release the claim) from an unrelated one.
+			if probeClaim != nil {
+				req = req.WithContext(manager.WithProbeClaim(req.Context(), probeClaim))
+			}
+
+			// Per-request token counts surface only in the proxy's usage
+			// handler; carry the labels resolved here to it.
+			req = req.WithContext(manager.WithTokenMetricLabels(req.Context(), poolLabel, priorityClass(hasConfiguredPriority)))
+
+			// One attempt per call, so the deferred observers run per attempt.
+			// An attempt that was handed back wrote nothing to the client and
+			// is not observed: the request's outcome is the last attempt's.
+			func() {
+				if isStreaming && latencyMetricPaths[req.URL.Path] {
+					lw := newLatencyWriter(w, requestStart, modelName, enclave.String(), poolLabel, priorityClass(hasConfiguredPriority))
+					// finish must run via defer: a backend that dies mid-stream
+					// unwinds ServeHTTP with http.ErrAbortHandler, and that request
+					// must still be counted as failed-before-first-token. served
+					// distinguishes that unwind from a normal return.
+					served := false
+					defer func() {
+						if attempt.Retry() {
+							return
+						}
+						lw.aborted = !served
+						lw.finish(req.Context())
+						observeRequestDuration(req.Context(), modelName, poolLabel, lw.class, true, lw.status, lw.aborted, requestStart, enclave.String())
+					}()
+					enclave.ServeHTTP(lw, req)
+					served = true
+					return
 				}
-			}
-			manager.ReservedPoolServesTotal.WithLabelValues(modelName, poolLabel).Inc()
-		}
-
-		if overloaded {
-			secs := int(retryAfter.Seconds())
-			if secs <= 0 {
-				secs = 60
-			}
-			w.Header().Set("Retry-After", strconv.Itoa(secs))
-			fields := log.Fields{
-				"model":               modelName,
-				"enclave":             enclave.String(),
-				"requests_waiting":    waiting,
-				"retry_after_seconds": secs,
-			}
-			// With hysteresis, requests_waiting can sit below the trip mark
-			// while the queue drains; log the marks so an in-band reject
-			// doesn't read as a contradiction.
-			if trip, clear, ok := enclave.OverloadMarks(); ok {
-				fields["max_requests_waiting"] = trip
-				fields["clear_requests_waiting"] = clear
-			}
-			log.WithFields(fields).Warn("rejecting request due to backend overload")
-
-			// Record rejection metrics
-			manager.RequestsRejectedTotal.WithLabelValues(modelName).Inc()
-			manager.RetryAfterSeconds.WithLabelValues(modelName).Observe(float64(secs))
-
-			jsonError(w, fmt.Sprintf("Request rate exceeded. Retry after %d seconds.", secs), manager.ErrTypeInvalidRequest, http.StatusTooManyRequests)
-			return
-		}
-
-		log.Debugf("%s serving request\n", enclave)
-
-		// Everything between arrival and here — body handling, route-context
-		// lookup, rate limiting, selection — is router overhead; isolate it
-		// so backend latency and router latency stay attributable.
-		manager.DispatchSeconds.WithLabelValues(modelName).Observe(time.Since(requestStart).Seconds())
-
-		// Hand the landing to the cache-route pipeline. Observed at
-		// dispatch so the picked replica counts as warm from prefill
-		// start; cannot affect the request.
-		if cacheRouteDecision != nil {
-			cacheRouteShadow.ObserveLanding(modelName, cacheRouteReq, cacheRouteDecision, enclave.String(), cacheRouteSettings)
-		} else if cacheRouteReq != nil {
-			cacheRouteShadow.Observe(modelName, cacheRouteReq, model.CacheRoutePoolIn(poolPrimary), enclave.String(), cacheRouteSettings)
-		}
-
-		// A claimed recovery probe travels with its request, so the
-		// enclave's outcome handlers can tell an owner's cancellation
-		// (which must release the claim) from an unrelated one.
-		if probeClaim != nil {
-			r = r.WithContext(manager.WithProbeClaim(r.Context(), probeClaim))
-		}
-
-		// Per-request token counts surface only in the proxy's usage
-		// handler; carry the labels resolved here to it.
-		r = r.WithContext(manager.WithTokenMetricLabels(r.Context(), poolLabel, priorityClass(hasConfiguredPriority)))
-
-		if isStreaming && latencyMetricPaths[r.URL.Path] {
-			lw := newLatencyWriter(w, requestStart, modelName, enclave.String(), poolLabel, priorityClass(hasConfiguredPriority))
-			// finish must run via defer: a backend that dies mid-stream
-			// unwinds ServeHTTP with http.ErrAbortHandler, and that request
-			// must still be counted as failed-before-first-token. served
-			// distinguishes that unwind from a normal return.
-			served := false
-			defer func() {
-				lw.aborted = !served
-				lw.finish(r.Context())
-				observeRequestDuration(r.Context(), modelName, poolLabel, lw.class, true, lw.status, lw.aborted, requestStart)
+				// WebSocket sessions are hijacked connections whose lifetime is the
+				// session, not a request — a duration observation there would be
+				// noise, so they proxy unwrapped.
+				if isWebSocketUpgrade(req) {
+					enclave.ServeHTTP(w, req)
+					return
+				}
+				served := false
+				defer func() {
+					if attempt.Retry() {
+						return
+					}
+					observeRequestDuration(req.Context(), modelName, poolLabel, priorityClass(hasConfiguredPriority), false, 0, !served, requestStart, enclave.String())
+				}()
+				enclave.ServeHTTP(w, req)
+				served = true
 			}()
-			enclave.ServeHTTP(lw, r)
-			served = true
-			return
+
+			if !attempt.Retry() {
+				return
+			}
+			failedHosts[enclave.String()] = true
+			manager.DispatchRetriesTotal.WithLabelValues(modelName, enclave.String(), attempt.Reason()).Inc()
+			log.WithFields(log.Fields{
+				"model":   modelName,
+				"enclave": enclave.String(),
+				"reason":  attempt.Reason(),
+			}).Warn("enclave failed before any response byte; dispatching to another enclave")
+			r.Body = io.NopCloser(bytes.NewReader(replayBody))
 		}
-		// WebSocket sessions are hijacked connections whose lifetime is the
-		// session, not a request — a duration observation there would be
-		// noise, so they proxy unwrapped.
-		if isWebSocketUpgrade(r) {
-			enclave.ServeHTTP(w, r)
-			return
-		}
-		served := false
-		defer func() {
-			observeRequestDuration(r.Context(), modelName, poolLabel, priorityClass(hasConfiguredPriority), false, 0, !served, requestStart)
-		}()
-		enclave.ServeHTTP(w, r)
-		served = true
 	}
 }

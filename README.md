@@ -122,3 +122,55 @@ token at redirect destinations. Backend metrics polling continues to use its
 separate `--metrics-api-key` / `METRICS_API_KEY` monitoring credential; it never
 uses `backend_auth_env`. Configure the inference token and metrics token with
 separate privileges. This option does not alter attestation or TLS pinning.
+
+## Multiple enclaves for one model
+
+These options matter when a model has more than one enclave. All of them are
+optional, and without them the router behaves as before.
+
+```yaml
+models:
+  two-host-model:
+    repo: owner/model
+    enclaves: [host1.example.com, host0.example.com]
+    health_probe_path: /health   # gate recovery probes behind the enclave's health endpoint
+    balance: least_inflight      # default: random
+    cache_route:
+      mode: enforced
+      max_inflight_delta: 2      # default: no cap
+```
+
+**Retry on another enclave.** When an enclave fails a request before any
+response byte reached the client, the router sends the request to another
+enclave of the model. This needs no configuration. It applies when the router
+buffered the request body (JSON and audio requests), another enclave of the
+caller's pools has a closed circuit breaker, and the failure is a transport
+error without a response (not a timeout) or a backend status 502, 503 or 504.
+A 500 and every other status go to the client unchanged. Each enclave is tried
+at most once per request. The failed attempt still counts against that
+enclave's breaker, and `router_dispatch_retries_total` counts the retries by
+enclave and reason. When no other enclave is available, the backend's own
+answer reaches the client.
+
+**Health gate (`health_probe_path`).** Without it, the recovery probe of an
+open breaker is the next client request after the cooldown, so an enclave that
+is attested but still loading its model fails one client request per cooldown.
+With it, the router requests this path on the enclave (attested TLS, no
+credential) every 5 seconds while the breaker is not closed, and a client
+request may probe the enclave only after the path answered 200. A new enclave
+that does not answer 200 joins the pool with an open breaker. The gate never
+closes the breaker itself: one real request must still succeed.
+`router_health_probes_total` counts the probes by result.
+
+**Balance (`balance: least_inflight`).** A request without a cache-aware pick
+goes to the healthy enclave with the fewest requests in flight at this router,
+instead of a random one. The in-flight count rises at once when an enclave is
+busy with a long prefill. The polled queue depth does not reach the overload
+mark in that case.
+
+**Load cap for cache-aware picks (`cache_route.max_inflight_delta`).** See
+`config.CacheRouteConfig`. A request that leaves its warm enclave loses its
+prefix cache there, so test a value before production use.
+
+`router_request_duration_seconds` carries an `enclave` label: the host that
+served the request, or `none` for tool-runtime requests.

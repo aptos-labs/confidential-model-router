@@ -215,6 +215,12 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 	}
 	proxy.Transport = &backendAuthTripper{base: transport}
 	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
+		// ModifyResponse already recorded the failure and marked the attempt:
+		// leave the client response untouched for the next enclave.
+		if errors.Is(err, errRetryElsewhere) {
+			return
+		}
+
 		// A body-limit trip during the outbound copy (chunked uploads pass
 		// the router's Content-Length pre-check) is a client fault: answer
 		// 413 and leave the breaker alone, or cheap oversized uploads could
@@ -254,6 +260,9 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 			ProbeClaimFromContext(r.Context()).Abort()
 		} else {
 			recordFailure(reason)
+			if retryableTransportReason(reason) && dispatchAttemptFromContext(r.Context()).handBack(reason) {
+				return
+			}
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadGateway)
@@ -268,7 +277,12 @@ func newProxy(host, publicKeyFP, modelName string, billingCollector *billing.Col
 	// Add token extraction and billing via ModifyResponse
 	proxy.ModifyResponse = func(resp *http.Response) error {
 		if resp.StatusCode >= 500 {
-			recordFailure(httpFailureReason(resp.StatusCode))
+			reason := httpFailureReason(resp.StatusCode)
+			recordFailure(reason)
+			// No byte of this response has reached the client yet.
+			if retryableStatus(resp.StatusCode) && dispatchAttemptFromContext(resp.Request.Context()).handBack(reason) {
+				return errRetryElsewhere
+			}
 		} else {
 			recordSuccess()
 		}

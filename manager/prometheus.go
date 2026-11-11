@@ -275,7 +275,28 @@ var (
 			Help:    "End-to-end request duration at the router from arrival to last byte written, by pool, priority, stream mode, and outcome (status-classified only for streaming)",
 			Buckets: []float64{0.25, 0.5, 1, 2, 5, 7.5, 10, 15, 20, 30, 45, 60, 120, 300, 600},
 		},
-		[]string{"model", "pool", "priority", "stream", "outcome"},
+		[]string{"model", "pool", "priority", "stream", "outcome", "enclave"},
+	)
+
+	// DispatchRetriesTotal counts requests that the router sent to another
+	// enclave after the labeled enclave failed before any response byte
+	// reached the client. The client does not see these failures.
+	DispatchRetriesTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "router_dispatch_retries_total",
+			Help: "Requests re-dispatched to another enclave after this enclave failed before any response byte reached the client, by failure reason.",
+		},
+		[]string{"model", "enclave", "reason"},
+	)
+
+	// HealthProbesTotal counts health-gate probes of enclaves whose breaker
+	// is not closed.
+	HealthProbesTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "router_health_probes_total",
+			Help: "Health endpoint probes of enclaves whose circuit breaker is not closed, by result (pass, fail).",
+		},
+		[]string{"model", "enclave", "result"},
 	)
 
 	// RequestPromptTokens and RequestCompletionTokens record per-request
