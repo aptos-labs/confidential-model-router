@@ -591,6 +591,26 @@ func (m *Model) pick(candidates []*Enclave) *Enclave {
 	return best[rand.IntN(len(best))]
 }
 
+// setHealthProbePath applies a changed health_probe_path to the model and to
+// the enclaves it already has: each gets a fresh gate, or loses its gate when
+// the path is removed. A fresh gate has not passed yet, so an enclave whose
+// breaker is open waits for one health check before its next live probe.
+// The caller must hold m.mu.
+func (m *Model) setHealthProbePath(modelName, path string) {
+	if path == m.healthProbePath {
+		return
+	}
+	m.healthProbePath = path
+	for host, enclave := range m.Enclaves {
+		enclave.health.shutdown()
+		enclave.health = nil
+		if path != "" {
+			enclave.health = newHealthGate(host, path, enclave.tlsKeyFP)
+			go enclave.health.run(enclave.cb, modelName, host)
+		}
+	}
+}
+
 // narrowed returns the allowed-host filter without the excluded hosts. A nil
 // allowed means every enclave of the model.
 func (m *Model) narrowed(allowed, exclude map[string]bool) map[string]bool {
@@ -1205,6 +1225,8 @@ func (em *EnclaveManager) sync() error {
 			model.RateLimit = configModel.RateLimit
 			model.CacheRoute = configModel.CacheRoute
 			model.CacheSalt = configModel.CacheSalt
+			model.leastInflight = configModel.Balance == "least_inflight"
+			model.setHealthProbePath(modelName, configModel.HealthProbePath)
 			model.applyReservations(modelName, configModel.Reservations, configModel.Hostnames)
 			for _, enclave := range model.Enclaves {
 				enclave.updateOverloadConfig(model.Overload)

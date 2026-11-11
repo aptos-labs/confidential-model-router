@@ -142,3 +142,46 @@ func TestHealthGateShutdownStopsRun(t *testing.T) {
 		t.Fatal("run did not stop after shutdown")
 	}
 }
+
+// A config reload that adds, changes or removes health_probe_path reaches the
+// enclaves the model already has, not only the ones added later.
+func TestSetHealthProbePathReconcilesEnclaves(t *testing.T) {
+	m := newTestModel("a", "b")
+	openPastCooldown(m.Enclaves["a"].cb)
+
+	m.mu.Lock()
+	m.setHealthProbePath("health-model", "/health")
+	m.mu.Unlock()
+	first := m.Enclaves["a"].health
+	if m.healthProbePath != "/health" || first == nil || m.Enclaves["b"].health == nil {
+		t.Fatalf("path %q: gates a=%v b=%v, want both set", m.healthProbePath, first, m.Enclaves["b"].health)
+	}
+	// The fresh gate has not passed: no client request probes the open enclave.
+	if got, claim := m.NextEnclave(nil); got == nil || got.host != "b" || claim != nil {
+		t.Fatalf("fresh gate: got %v claim=%v, want b without a probe", got, claim)
+	}
+
+	// The same path again keeps the gates and their state.
+	m.mu.Lock()
+	m.setHealthProbePath("health-model", "/health")
+	m.mu.Unlock()
+	if m.Enclaves["a"].health != first {
+		t.Fatal("an unchanged path must keep the gate")
+	}
+
+	// Removing the path stops the gates and restores the original live probe.
+	m.mu.Lock()
+	m.setHealthProbePath("health-model", "")
+	m.mu.Unlock()
+	if m.Enclaves["a"].health != nil || m.Enclaves["b"].health != nil {
+		t.Fatal("a removed path must drop the gates")
+	}
+	select {
+	case <-first.stop:
+	default:
+		t.Fatal("the replaced gate must be stopped")
+	}
+	if got, claim := m.NextEnclave(nil); got == nil || got.host != "a" || claim == nil {
+		t.Fatalf("no gate: got %v claim=%v, want the live probe on a", got, claim)
+	}
+}

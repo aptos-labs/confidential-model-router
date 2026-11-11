@@ -1022,6 +1022,13 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 			// path-routed ones; this is the only place their body is parsed.
 			isStreaming = streamRequested
 			recordCacheSaltInjection(modelName, mode)
+			// saltProxiedBody left the whole body in memory. Keep it, so a
+			// subdomain-routed request can go to a second enclave like a
+			// path-routed one.
+			if buffered, err := io.ReadAll(r.Body); err == nil {
+				r.Body = io.NopCloser(bytes.NewReader(buffered))
+				replayBody, replayable = buffered, true
+			}
 		}
 
 		model, found := em.GetModel(modelName)

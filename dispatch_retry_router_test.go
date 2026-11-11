@@ -147,3 +147,50 @@ func TestRouterDoesNotRetryInternalServerError(t *testing.T) {
 		t.Fatalf("calls=%d status=%d body=%q", calls.Load(), rec.Code, rec.Body.String())
 	}
 }
+
+// A request routed by subdomain is buffered like a path-routed one, so it
+// must get the same retry.
+func TestRouterRetriesSubdomainRoutedRequest(t *testing.T) {
+	oldSalt := *cacheSaltEnabled
+	*cacheSaltEnabled = false
+	t.Cleanup(func() { *cacheSaltEnabled = oldSalt })
+
+	const reply = `{"choices":[{"message":{"role":"assistant","content":"hello"}}]}`
+	const body = `{"messages":[{"role":"user","content":"subdomain hello"}],"stream":false}`
+	var notReadyCalls, readyCalls atomic.Int64
+	notReady := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		notReadyCalls.Add(1)
+		io.Copy(io.Discard, r.Body)
+		w.WriteHeader(http.StatusServiceUnavailable)
+	})
+	ready := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		readyCalls.Add(1)
+		got, _ := io.ReadAll(r.Body)
+		if !strings.Contains(string(got), "subdomain hello") {
+			t.Errorf("the replayed body is not the request body: %s", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, reply)
+	})
+	em, hosts := manager.NewMultiEnclaveRouterTestManager(retryTestModel, []http.Handler{notReady, ready})
+	handler := newRouterHandler(em, nil)
+
+	const requests = 40
+	for i := 0; i < requests; i++ {
+		r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+		r.Header.Set("Content-Type", "application/json")
+		r.Header.Set("Authorization", "Bearer retry-test-only-token")
+		r.Header.Set("X-Forwarded-Host", retryTestModel+"."+*domain)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, r)
+		if rec.Code != http.StatusOK || rec.Body.String() != reply || rec.Header().Get("Tinfoil-Enclave") != hosts[1] {
+			t.Fatalf("request %d: status=%d enclave=%q body=%s", i, rec.Code, rec.Header().Get("Tinfoil-Enclave"), rec.Body.String())
+		}
+	}
+	if readyCalls.Load() != requests {
+		t.Fatalf("ready host calls = %d, want %d", readyCalls.Load(), requests)
+	}
+	if n := notReadyCalls.Load(); n < 1 || n > 3 {
+		t.Fatalf("not-ready host calls = %d, want 1 to 3", n)
+	}
+}

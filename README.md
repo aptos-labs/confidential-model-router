@@ -126,7 +126,8 @@ separate privileges. This option does not alter attestation or TLS pinning.
 ## Multiple enclaves for one model
 
 These options matter when a model has more than one enclave. All of them are
-optional, and without them the router behaves as before.
+optional, and without them the router behaves as before. They follow the runtime
+config refresh like the other per-model settings.
 
 ```yaml
 models:
@@ -143,7 +144,8 @@ models:
 **Retry on another enclave.** When an enclave fails a request before any
 response byte reached the client, the router sends the request to another
 enclave of the model. This needs no configuration. It applies when the router
-buffered the request body (JSON and audio requests), another enclave of the
+buffered the request body (JSON and audio requests, routed by path or by
+subdomain), another enclave of the
 caller's pools has a closed circuit breaker, and the failure is a transport
 error without a response (not a timeout) or a backend status 502, 503 or 504.
 A 500 and every other status go to the client unchanged. Each enclave is tried
