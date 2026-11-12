@@ -4,7 +4,7 @@ cpus: 8
 
 containers:
   - name: "proxy"
-    image: "ghcr.io/aptos-labs/confidential-model-router@sha256:dec0f0ab1a0521e14c5085ee433227fab82858ff8e0a89b76e9a6427344a9882" # v0.0.175-aptos.1
+    image: "ghcr.io/aptos-labs/confidential-model-router@sha256:cea66e19f6bb4a5559e5172d62f1327e0974de2db8bac5e49e0ad0449d7cad7a" # v0.0.175-aptos.1
     restart: always
     networks: [web]
     env:
