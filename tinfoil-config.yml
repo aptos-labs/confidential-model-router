@@ -1,73 +1,75 @@
-cvm-version: 0.11.0
+containers:
+- env:
+  - REFRESH_INTERVAL: 1m
+  - CACHE_SALT_ENABLED: 'true'
+  - USAGE_REPORTER_ID: model-router
+  - CONTROL_PLANE_URL: https://api.inference.aptoslabs.com/
+  - UPDATE_CONFIG_URL: https://api.inference.aptoslabs.com/api/shim/router-config
+  healthcheck:
+    interval: 30s
+    start_period: 5m
+    test:
+    - CMD
+    - wget
+    - -q
+    - --spider
+    - http://localhost:8089/health
+    timeout: 10s
+  image: ghcr.io/aptos-labs/confidential-model-router@sha256:03091065a6c100f39a1374b1e1e0605c14a83de8bd5a4a95c77f49ec162cabda
+  ipc: private
+  name: router
+  networks:
+  - router-egress
+  restart: always
+  secrets:
+  - USAGE_REPORTER_SECRET
+  - USAGE_CONTEXT_SECRET
+  - GLM_BACKEND_API_KEY
+  - METRICS_API_KEY
+  tmpfs:
+    /tmp: size=256m,mode=1777,exec
 cpus: 8
-memory: 16384
-gpus: 0
-models: []
-
 cvm-network:
   inbound-ports:
-    - 443
-
+  - 443
+cvm-version: 0.11.0
+gpus: 0
+memory: 16384
+models: []
 networks:
   router-egress:
-    egress: allowlist
     allow:
-      - github-proxy.tinfoil.sh
-      - tuf-repo-cdn.sigstore.dev
-      - api.inference.aptoslabs.com
-      - host0.inference.aptoslabs.com
-      - host1.inference.aptoslabs.com
-
-containers:
-  - name: router
-    image: "ghcr.io/aptos-labs/confidential-model-router@sha256:03091065a6c100f39a1374b1e1e0605c14a83de8bd5a4a95c77f49ec162cabda" # v0.0.175-aptos.2
-    ipc: private
-    restart: always
-    networks: [router-egress]
-    env:
-      - REFRESH_INTERVAL: "1m"
-      - CACHE_SALT_ENABLED: "true"
-      - USAGE_REPORTER_ID: "model-router"
-      - CONTROL_PLANE_URL: "https://api.inference.aptoslabs.com/"
-      - UPDATE_CONFIG_URL: "https://api.inference.aptoslabs.com/api/shim/router-config"
-    secrets:
-      - USAGE_REPORTER_SECRET
-      - USAGE_CONTEXT_SECRET
-      - GLM_BACKEND_API_KEY
-      - METRICS_API_KEY
-    healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8089/health"]
-      interval: 30s
-      timeout: 10s
-      start_period: 5m
-    tmpfs:
-      /tmp: size=256m,mode=1777,exec
-
+    - github-proxy.tinfoil.sh
+    - tuf-repo-cdn.sigstore.dev
+    - api.inference.aptoslabs.com
+    - host0.inference.aptoslabs.com
+    - host1.inference.aptoslabs.com
+    egress: allowlist
 shim:
-  upstream-container: router
-  upstream-port: 8089
-  paths:
-    - /v1/chat/completions
-    - /v1/completions
-    - /v1/embeddings
-    - /v1/models
-    - /v1/videos/sync
-    - /health
-    - /metrics
-    - /source
-    - /
-  dummy-attestation: false
-  publish-attestation: false
+  atc: https://atc.inference.aptoslabs.com
   authenticated: true
   authenticated-endpoints:
-    - /v1/chat/completions
-    - /v1/completions
-    - /v1/embeddings
-    - /v1/models
-    - /v1/videos/sync
-    - /metrics
-  tls-mode: cert-proxy
-  tls-challenge: dns
-  tls-own-san-domain: true
+  - /v1/chat/completions
+  - /v1/completions
+  - /v1/embeddings
+  - /v1/models
+  - /v1/videos/sync
+  - /metrics
   control-plane: https://api.inference.aptoslabs.com/
-  atc: https://atc.inference.aptoslabs.com
+  dummy-attestation: false
+  paths:
+  - /v1/chat/completions
+  - /v1/completions
+  - /v1/embeddings
+  - /v1/models
+  - /v1/videos/sync
+  - /health
+  - /metrics
+  - /source
+  - /
+  publish-attestation: false
+  tls-challenge: dns
+  tls-mode: cert-proxy
+  tls-own-san-domain: true
+  upstream-container: router
+  upstream-port: 8089
