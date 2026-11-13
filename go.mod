@@ -108,7 +108,3 @@ require (
 // Standalone verifier v0.10.11, vendored because it imports github.com/google/go-sev-guest, which
 // registers the same protobuf files as the github.com/tinfoilsh/go-sev-guest that tinfoil-go links.
 replace github.com/tinfoilsh/verifier => ./third_party/verifier
-
-// go-tdx-guest v0.3.1, with FMSPC compared case-insensitively so the uppercase
-// value in ATC-captured TCB info matches the lowercase PCK extension encoding.
-replace github.com/google/go-tdx-guest => ./third_party/go-tdx-guest
