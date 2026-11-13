@@ -4,6 +4,7 @@ go 1.27.3
 
 require (
 	github.com/cespare/xxhash/v2 v2.3.0
+	github.com/google/go-tdx-guest v0.3.1
 	github.com/google/jsonschema-go v0.4.2
 	github.com/google/uuid v1.6.0
 	github.com/modelcontextprotocol/go-sdk v1.5.0
@@ -16,6 +17,7 @@ require (
 	github.com/tinfoilsh/usage-reporting-go v0.1.4
 	github.com/tinfoilsh/verifier v0.10.11
 	golang.org/x/sync v0.23.0
+	google.golang.org/protobuf v1.36.11
 	gopkg.in/yaml.v2 v2.4.0
 )
 
@@ -54,7 +56,6 @@ require (
 	github.com/go-viper/mapstructure/v2 v2.5.0 // indirect
 	github.com/google/certificate-transparency-go v1.3.3 // indirect
 	github.com/google/go-containerregistry v0.21.7 // indirect
-	github.com/google/go-tdx-guest v0.3.1 // indirect
 	github.com/google/logger v1.1.2 // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.29.0 // indirect
 	github.com/in-toto/attestation v1.2.0 // indirect
@@ -100,7 +101,6 @@ require (
 	google.golang.org/genproto/googleapis/api v0.0.0-20260713224248-f5fc221cf8c4 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260713224248-f5fc221cf8c4 // indirect
 	google.golang.org/grpc v1.83.2 // indirect
-	google.golang.org/protobuf v1.36.11 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	k8s.io/klog/v2 v2.140.0 // indirect
 )
@@ -108,3 +108,7 @@ require (
 // Standalone verifier v0.10.11, vendored because it imports github.com/google/go-sev-guest, which
 // registers the same protobuf files as the github.com/tinfoilsh/go-sev-guest that tinfoil-go links.
 replace github.com/tinfoilsh/verifier => ./third_party/verifier
+
+// go-tdx-guest v0.3.1, with FMSPC compared case-insensitively so the uppercase
+// value in ATC-captured TCB info matches the lowercase PCK extension encoding.
+replace github.com/google/go-tdx-guest => ./third_party/go-tdx-guest

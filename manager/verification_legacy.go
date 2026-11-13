@@ -30,6 +30,10 @@ import (
 // is therefore a router-local bound on how long one successful verification may
 // authorize new requests; the refresh cadence in attestationRefreshDue keeps it
 // well ahead of that bound while upstream sources are reachable.
+//
+// For TDX, the v3 attestation's captured Intel collateral is replayed as well.
+// That checks TCB status, revocation, and the module policy. Its nextUpdate is
+// not the freshness deadline above.
 const (
 	hardwareMeasurementsRepo = "tinfoilsh/hardware-measurements"
 	legacyVerificationTTL    = 2 * attestationRenewalWindow
@@ -57,6 +61,7 @@ type releaseVerifier struct {
 	latestDigest   func(repo string) (string, error)
 	verifyRelease  func(repo, digest string) (*legacyattestation.Measurement, error)
 	fetchHardware  func(digest string) ([]*legacyattestation.HardwareMeasurement, error)
+	checkTdx       func(ctx context.Context, host string, doc *legacyattestation.Document) error
 }
 
 var defaultReleaseVerifier = newReleaseVerifier()
@@ -74,6 +79,7 @@ func newReleaseVerifier() *releaseVerifier {
 	}
 	r.verifyRelease = r.verifySigstoreRelease
 	r.fetchHardware = r.fetchSigstoreHardware
+	r.checkTdx = r.checkTdxPolicy
 	return r
 }
 
@@ -128,6 +134,11 @@ func (r *releaseVerifier) verifyWithin(ctx context.Context, host, repo string) (
 		return nil, fmt.Errorf("enclave does not match %s@%s: %w", repo, tag, err)
 	}
 	if verified.Measurement.Type == legacyattestation.TdxGuestV2 {
+		if r.checkTdx != nil {
+			if err := r.checkTdx(ctx, host, doc); err != nil {
+				return nil, fmt.Errorf("checking TDX platform policy: %w", err)
+			}
+		}
 		// Release attestations cover RTMR1 and RTMR2 only; a nonzero RTMR3 means
 		// the guest extended its measurements at runtime.
 		if len(verified.Measurement.Registers) != 5 || verified.Measurement.Registers[4] != measurement.RTMR3_ZERO {
@@ -256,10 +267,29 @@ func (r *releaseVerifier) fetchSigstoreHardware(digest string) ([]*legacyattesta
 	return client.FetchHardwareMeasurements(hardwareMeasurementsRepo, digest)
 }
 
+func (r *releaseVerifier) checkTdxPolicy(ctx context.Context, host string, doc *legacyattestation.Document) error {
+	body, err := fetchAttestationV3(ctx, host)
+	if err != nil {
+		return err
+	}
+	return verifyCapturedTdxPolicy(doc.Body, body, r.now())
+}
+
 // fetchAttestationDocument disables connection reuse so backends that share an
 // address cannot be served over a pooled connection negotiated for another SNI.
 func fetchAttestationDocument(ctx context.Context, host string) (*legacyattestation.Document, error) {
-	target := url.URL{Scheme: "https", Host: host, Path: "/.well-known/tinfoil-attestation"}
+	body, err := getAttestation(ctx, url.URL{Scheme: "https", Host: host, Path: "/.well-known/tinfoil-attestation"})
+	if err != nil {
+		return nil, err
+	}
+	var doc legacyattestation.Document
+	if err := json.Unmarshal(body, &doc); err != nil {
+		return nil, err
+	}
+	return &doc, nil
+}
+
+func getAttestation(ctx context.Context, target url.URL) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target.String(), nil)
 	if err != nil {
 		return nil, err
@@ -276,12 +306,12 @@ func fetchAttestationDocument(ctx context.Context, host string) (*legacyattestat
 		return nil, err
 	}
 	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxAttestationDocBytes))
+	if err != nil {
+		return nil, err
+	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("GET %s: %s", target.String(), resp.Status)
 	}
-	var doc legacyattestation.Document
-	if err := json.NewDecoder(io.LimitReader(resp.Body, maxAttestationDocBytes)).Decode(&doc); err != nil {
-		return nil, err
-	}
-	return &doc, nil
+	return body, nil
 }

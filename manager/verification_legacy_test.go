@@ -212,6 +212,31 @@ func TestLegacyVerificationCachesImmutableReleaseData(t *testing.T) {
 	}
 }
 
+func TestLegacyVerificationChecksTdxPolicyOnly(t *testing.T) {
+	tdx := newLegacyFixture()
+	var checked atomic.Int32
+	tdx.verifier.checkTdx = func(context.Context, string, *legacyattestation.Document) error {
+		checked.Add(1)
+		return nil
+	}
+	if _, err := tdx.verify(t); err != nil {
+		t.Fatal(err)
+	}
+	if checked.Load() != 1 {
+		t.Fatalf("TDX policy checks = %d", checked.Load())
+	}
+
+	sev := newLegacyFixture()
+	sev.enclave = &legacyattestation.Measurement{Type: legacyattestation.SevGuestV2, Registers: []string{sev.source.Registers[0]}}
+	sev.verifier.checkTdx = func(context.Context, string, *legacyattestation.Document) error {
+		t.Fatal("SEV verification consulted the TDX policy")
+		return nil
+	}
+	if _, err := sev.verify(t); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestLegacyVerificationSkipsHardwareForSEV(t *testing.T) {
 	f := newLegacyFixture()
 	f.enclave = &legacyattestation.Measurement{Type: legacyattestation.SevGuestV2, Registers: []string{f.source.Registers[0]}}
