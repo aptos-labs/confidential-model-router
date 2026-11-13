@@ -1,10 +1,19 @@
-# Trust anchor baked into the image. Repo pins and backend credentials are
-# fixed here; a change requires a router release. Live hostnames, overload,
-# and cache-route settings refresh from UPDATE_CONFIG_URL.
+# Trust anchor baked into the image. Repo pins, release digests, the hardware
+# catalog, and backend credentials are fixed here; a change requires a router
+# release. Live hostnames, overload, and cache-route settings refresh from
+# UPDATE_CONFIG_URL.
+
+# tinfoilsh/hardware-measurements v0.0.47, the catalog the ATC serves.
+hardware_measurements:
+  - v0.0.47@d80f92482bfffc1033d2e4b88c0df6e1090e8825d91d43715beb06742ec6a96b
 
 models:
   glm-5.3:
     repo: aptos-labs/confidential-glm-5-3-prod
+    # aptos-labs/confidential-glm-5-3-prod v0.0.18. Older ATC-allowed tags are
+    # not accepted until their artifact digests are pinned here.
+    releases:
+      - v0.0.18@47b4d1472a067966473ecdc0b79d3d92ffb2b9f19b81e92f37171cb961372252
     backend_auth_env: GLM_BACKEND_API_KEY
     enclaves:
       - host1.inference.aptoslabs.com
