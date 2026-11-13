@@ -4,6 +4,7 @@ import (
 	_ "embed"
 	"encoding/hex"
 	"fmt"
+	"strings"
 
 	protobundle "github.com/sigstore/protobuf-specs/gen/pb-go/bundle/v1"
 	"github.com/sigstore/sigstore-go/pkg/bundle"
@@ -111,6 +112,97 @@ func (c *Client) VerifyBundle(bundleJSON []byte, repo, hexDigest string) (*verif
 	return result, nil
 }
 
+// VerifyPinnedAttestation authenticates a code bundle that is already in hand.
+// repo and tag are the trusted release, and hexDigest is that release's artifact
+// digest. The certificate must be a GitHub-hosted build of that tag.
+func (c *Client) VerifyPinnedAttestation(bundleJSON []byte, hexDigest, repo, tag string) (*attestation.Measurement, error) {
+	if _, err := c.authenticatePinnedBundle(bundleJSON, repo, tag, hexDigest); err != nil {
+		return nil, err
+	}
+	return c.VerifyAttestation(bundleJSON, hexDigest, repo)
+}
+
+// VerifyPinnedHardware authenticates a hardware-measurements bundle already in
+// hand. It does not contact GitHub.
+func (c *Client) VerifyPinnedHardware(bundleJSON []byte, hexDigest, repo, tag string) ([]*attestation.HardwareMeasurement, error) {
+	result, err := c.authenticatePinnedBundle(bundleJSON, repo, tag, hexDigest)
+	if err != nil {
+		return nil, err
+	}
+	return hardwareMeasurements(result, hexDigest)
+}
+
+func (c *Client) authenticatePinnedBundle(bundleJSON []byte, repo, tag, hexDigest string) (*verify.VerificationResult, error) {
+	result, err := c.VerifyBundle(bundleJSON, repo, hexDigest)
+	if err != nil {
+		return nil, fmt.Errorf("verifying bundle: %w", err)
+	}
+	if err := requirePinnedRelease(result, repo, tag); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+// requirePinnedRelease binds the verified certificate to one repository and tag.
+// VerifiedIdentity is the caller's policy, not the certificate, so the
+// repository and workflow come from the certificate summary. The artifact
+// digest is enforced separately, as the Sigstore artifact policy.
+func requirePinnedRelease(result *verify.VerificationResult, repo, tag string) error {
+	if result == nil || result.Signature == nil || result.Signature.Certificate == nil {
+		return fmt.Errorf("bundle has no verified certificate")
+	}
+	cert := result.Signature.Certificate
+	if cert.Issuer != oidcIssuer {
+		return fmt.Errorf("bundle issuer is %q, not GitHub Actions", cert.Issuer)
+	}
+	repositoryURI := "https://github.com/" + repo
+	switch {
+	case cert.SourceRepositoryURI != "":
+		if cert.SourceRepositoryURI != repositoryURI {
+			return fmt.Errorf("bundle repository is %s, not %s", cert.SourceRepositoryURI, repositoryURI)
+		}
+	case cert.GithubWorkflowRepository != "":
+		if cert.GithubWorkflowRepository != repo {
+			return fmt.Errorf("bundle repository is %s, not %s", cert.GithubWorkflowRepository, repo)
+		}
+	default:
+		return fmt.Errorf("bundle certificate has no repository")
+	}
+	if cert.RunnerEnvironment != "github-hosted" {
+		return fmt.Errorf("bundle runner is %q, not github-hosted", cert.RunnerEnvironment)
+	}
+	if err := requireWorkflow(cert.SubjectAlternativeName, repositoryURI, repo, tag, "subject"); err != nil {
+		return err
+	}
+	// Some certificates repeat the workflow in the build-signer extension.
+	// When it is present it has to name the same tag.
+	if cert.BuildSignerURI != "" {
+		if err := requireWorkflow(cert.BuildSignerURI, repositoryURI, repo, tag, "workflow"); err != nil {
+			return err
+		}
+	}
+	if ref := cert.SourceRepositoryRef; ref != "" && ref != "refs/tags/"+tag {
+		return fmt.Errorf("bundle ref %q is not refs/tags/%s", ref, tag)
+	}
+	if ref := cert.GithubWorkflowRef; ref != "" && ref != "refs/tags/"+tag {
+		return fmt.Errorf("bundle ref %q is not refs/tags/%s", ref, tag)
+	}
+	return nil
+}
+
+func requireWorkflow(value, repositoryURI, repo, tag, what string) error {
+	prefix := repositoryURI + "/.github/workflows/"
+	suffix := "@refs/tags/" + tag
+	if !strings.HasPrefix(value, prefix) || !strings.HasSuffix(value, suffix) {
+		return fmt.Errorf("bundle %s %q is not a tagged build of %s@%s", what, value, repo, tag)
+	}
+	workflow := strings.TrimSuffix(strings.TrimPrefix(value, prefix), suffix)
+	if workflow == "" || strings.ContainsAny(workflow, "/@") {
+		return fmt.Errorf("bundle %s name %q is not a single workflow file", what, workflow)
+	}
+	return nil
+}
+
 func (c *Client) VerifyAttestation(
 	bundleJSON []byte,
 	hexDigest, repo string,
@@ -187,7 +279,13 @@ func (c *Client) FetchHardwareMeasurements(repo, digest string) ([]*attestation.
 	if err != nil {
 		return nil, err
 	}
+	return hardwareMeasurements(bundle, digest)
+}
 
+func hardwareMeasurements(bundle *verify.VerificationResult, digest string) ([]*attestation.HardwareMeasurement, error) {
+	if bundle == nil || bundle.Statement == nil {
+		return nil, fmt.Errorf("hardware bundle has no statement")
+	}
 	predicate := bundle.Statement.Predicate
 	predicateType := bundle.Statement.PredicateType
 
