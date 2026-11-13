@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/tinfoilsh/tinfoil-go/enclave"
-	"github.com/tinfoilsh/tinfoil-go/verify"
 )
 
 const (
@@ -17,14 +16,6 @@ const (
 	attestationRefreshInterval = time.Hour
 	runtimeConfigTimeout       = 30 * time.Second
 )
-
-func verifyEnclave(host, repo string) (*verify.Verification, error) {
-	handle, err := enclave.NewHandle(host, repo, nil)
-	if err != nil {
-		return nil, err
-	}
-	return handle.Verify()
-}
 
 type verifiedAttestation struct {
 	expiresAt  time.Time
