@@ -14,6 +14,7 @@ require (
 	github.com/spf13/cobra v1.10.2
 	github.com/tinfoilsh/tinfoil-go v0.17.0-rc.4
 	github.com/tinfoilsh/usage-reporting-go v0.1.4
+	github.com/tinfoilsh/verifier v0.10.11
 	golang.org/x/sync v0.23.0
 	gopkg.in/yaml.v2 v2.4.0
 )
@@ -103,3 +104,7 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	k8s.io/klog/v2 v2.140.0 // indirect
 )
+
+// Standalone verifier v0.10.11, vendored because it imports github.com/google/go-sev-guest, which
+// registers the same protobuf files as the github.com/tinfoilsh/go-sev-guest that tinfoil-go links.
+replace github.com/tinfoilsh/verifier => ./third_party/verifier

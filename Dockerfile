@@ -8,6 +8,7 @@ WORKDIR /app
 ARG VERSION
 
 COPY go.mod ./
+COPY third_party ./third_party
 RUN go mod download
 
 COPY . .
