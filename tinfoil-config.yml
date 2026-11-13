@@ -20,7 +20,7 @@ networks:
 
 containers:
   - name: router
-    image: "ghcr.io/aptos-labs/confidential-model-router@sha256:0000000000000000000000000000000000000000000000000000000000000000" # placeholder - populated during release
+    image: "ghcr.io/aptos-labs/confidential-model-router@sha256:71d1cbe47a133a67e2caa8a04bca90e877a2c4fdbc0fad160f0a69acc665d78d" # v0.0.175-aptos.4
     ipc: private
     restart: always
     networks: [router-egress]
