@@ -56,15 +56,21 @@ func verifyCapturedTdxPolicy(v2Body string, v3Document []byte, now time.Time) er
 	if err != nil {
 		return err
 	}
-	if err := verify.TdxQuote(v2Quote, &verify.Options{Now: now}); err != nil {
-		return fmt.Errorf("verifying v2 quote: %w", err)
-	}
-	if err := verify.TdxQuote(v3Quote, &verify.Options{
+	// Both quotes are checked against the captured collateral. The v2 quote is
+	// the one whose report data binds the TLS key; the v3 quote carries no such
+	// binding the router checks, so a v3 quote from another platform must not
+	// vouch for the platform that serves traffic. A v2 quote whose PCK chain,
+	// FMSPC, or TCB the collateral does not cover fails here.
+	options := &verify.Options{
 		GetCollateral:    true,
 		CheckRevocations: true,
 		Now:              now,
 		Getter:           capturedCollateral{responses: responses},
-	}); err != nil {
+	}
+	if err := verify.TdxQuote(v2Quote, options); err != nil {
+		return fmt.Errorf("verifying v2 quote against collateral: %w", err)
+	}
+	if err := verify.TdxQuote(v3Quote, options); err != nil {
 		return fmt.Errorf("verifying TDX collateral: %w", err)
 	}
 	if err := applyTdxModulePolicy(v3Quote); err != nil {
