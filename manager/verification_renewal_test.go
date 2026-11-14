@@ -356,3 +356,34 @@ func TestAttestationRejectsMissingOrExpiredVerificationDeadline(t *testing.T) {
 		})
 	}
 }
+
+func TestRuntimeConfigCannotReplaceReleasePins(t *testing.T) {
+	server, key := renewalServer(t, nil)
+	now := time.Now()
+	em, model, existing := renewalManager(t, server, now.Add(2*attestationRenewalWindow), now, func(_, repo string) (*verify.Verification, error) {
+		if repo != renewalTestRepo {
+			t.Errorf("verification repo = %s", repo)
+		}
+		return renewalVerification(key, now.Add(2*attestationRenewalWindow)), nil
+	})
+	pinned := "v0.0.18@" + legacyTestDigest
+	hardware := "v0.0.47@" + legacyTestHWDigest
+	model.pinnedReleases = []string{pinned}
+	em.hardwarePins = []string{hardware}
+	replacement := "v9.9.9@" + strings.Repeat("ab", 32)
+	body := fmt.Sprintf("hardware_measurements: [%q]\nmodels:\n  %s:\n    repo: %s\n    releases: [%q]\n    enclaves: [%q]\n", replacement, renewalTestModel, renewalTestRepo, replacement, existing.host)
+	path := t.TempDir() + "/config.yaml"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	em.updateConfigURL = path
+	if err := em.sync(); err != nil {
+		t.Fatal(err)
+	}
+	if !sameReleaseList(model.pinnedReleases, []string{pinned}) || !sameReleaseList(em.hardwarePins, []string{hardware}) {
+		t.Fatalf("runtime config replaced pins: model=%v hardware=%v", model.pinnedReleases, em.hardwarePins)
+	}
+	if _, ok := model.configuredHosts[existing.host]; !ok {
+		t.Fatal("ignoring a release pin also dropped the backend")
+	}
+}

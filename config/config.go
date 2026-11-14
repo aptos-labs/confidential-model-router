@@ -51,12 +51,15 @@ type Model struct {
 	// BackendAuthEnv names an environment variable containing a raw backend
 	// bearer token. Resolved once at startup for this model's configured hosts;
 	// omitted preserves the caller/delegated Authorization behavior.
-	BackendAuthEnv string              `yaml:"backend_auth_env,omitempty"`
-	Repo           string              `yaml:"repo"`
-	Hostnames      []string            `yaml:"enclaves"`
-	Overload       *OverloadConfig     `yaml:"overload,omitempty"`
-	CacheRoute     *CacheRouteConfig   `yaml:"cache_route,omitempty"`
-	Reservations   []ReservationConfig `yaml:"reservations,omitempty"`
+	BackendAuthEnv string `yaml:"backend_auth_env,omitempty"`
+	Repo           string `yaml:"repo"`
+	// Releases are approved tag@digest builds of Repo. The runtime config
+	// cannot change them; they are read from the image's config only.
+	Releases     []string            `yaml:"releases,omitempty"`
+	Hostnames    []string            `yaml:"enclaves"`
+	Overload     *OverloadConfig     `yaml:"overload,omitempty"`
+	CacheRoute   *CacheRouteConfig   `yaml:"cache_route,omitempty"`
+	Reservations []ReservationConfig `yaml:"reservations,omitempty"`
 }
 
 // OverloadConfig describes optional overload thresholds for a model.
@@ -121,6 +124,10 @@ func (c *OverloadConfig) RetryAfter() time.Duration {
 // Config represents the configuration structure matching config.yml
 type Config struct {
 	Models map[string]Model `yaml:"models"`
+	// HardwareMeasurements are approved tag@digest releases of
+	// tinfoilsh/hardware-measurements. Like model releases, they are fixed
+	// in the image.
+	HardwareMeasurements []string `yaml:"hardware_measurements,omitempty"`
 }
 
 // FromBytes parses a YAML config from bytes
@@ -177,9 +184,20 @@ func FromBytes(data []byte) (*Config, error) {
 				reservedBy[host] = i + 1
 			}
 		}
+		if err := validateReleaseList(model.Releases); err != nil {
+			return nil, fmt.Errorf("model %q: %w", name, err)
+		}
+	}
+	if err := validateReleaseList(config.HardwareMeasurements); err != nil {
+		return nil, fmt.Errorf("hardware measurements: %w", err)
 	}
 
 	return &config, nil
+}
+
+func validateReleaseList(values []string) error {
+	_, err := ParseReleasePins(values)
+	return err
 }
 
 // Loads configuration from a URL or file

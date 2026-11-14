@@ -54,6 +54,9 @@ type Model struct {
 	Enclaves          map[string]*Enclave      `json:"enclaves"`
 	Overload          *config.OverloadConfig   `json:"overload,omitempty"`
 	CacheRoute        *config.CacheRouteConfig `json:"cache_route,omitempty"`
+	// pinnedReleases is the image's approved tag@digest list. Runtime config
+	// cannot replace it.
+	pinnedReleases []string
 	// Reservations is excluded from JSON: Status() feeds the public
 	// /.well-known/tinfoil-proxy endpoint, and org and user ids must not be
 	// exposed there.
@@ -206,6 +209,7 @@ type EnclaveManager struct {
 	lastSuccessfulUpdate time.Time
 	lastAttemptedUpdate  time.Time
 	debug                bool
+	hardwarePins         []string
 }
 
 // SetDebugMode enables debug-only behaviors such as honoring the
@@ -687,6 +691,9 @@ func NewEnclaveManager(configFile []byte, controlPlaneURL string, usageReporterI
 		return nil, err
 	}
 
+	if err := applyBackendPins(cfg); err != nil {
+		return nil, err
+	}
 	backendAuth, err := loadBackendCredentials(cfg)
 	if err != nil {
 		return nil, err
@@ -705,6 +712,7 @@ func NewEnclaveManager(configFile []byte, controlPlaneURL string, usageReporterI
 		cacheRouteShadow:     cacheroute.NewShadow(nil),
 		refreshInterval:      refreshInterval,
 		debug:                debug,
+		hardwarePins:         append([]string(nil), cfg.HardwareMeasurements...),
 	}
 
 	for modelName, modelConfig := range cfg.Models {
@@ -724,6 +732,7 @@ func (em *EnclaveManager) addModel(modelName string, modelConfig config.Model) {
 		Enclaves:          make(map[string]*Enclave),
 		Overload:          modelConfig.Overload,
 		CacheRoute:        modelConfig.CacheRoute,
+		pinnedReleases:    append([]string(nil), modelConfig.Releases...),
 	}
 	model.setConfiguredHosts(modelConfig.Hostnames)
 	model.applyReservations(modelName, modelConfig.Reservations, modelConfig.Hostnames)
@@ -753,6 +762,9 @@ func (em *EnclaveManager) sync() error {
 	config, configErr := config.LoadContext(ctx, em.updateConfigURL, false)
 	if configErr == nil {
 		em.refreshModelMetadata()
+		if len(config.HardwareMeasurements) > 0 && !sameReleaseList(em.hardwarePins, config.HardwareMeasurements) {
+			log.Errorf("hardware measurement pins in the runtime config differ from the image and were ignored")
+		}
 		em.models.Range(func(key, value any) bool {
 			modelName := key.(string)
 			model := value.(*Model)
@@ -776,6 +788,9 @@ func (em *EnclaveManager) sync() error {
 			if model.Repo != configModel.Repo {
 				log.Errorf("repo changed for model %s: %s -> %s. Publish a new release and update this router if you want the change to take effect.", modelName, model.Repo, configModel.Repo)
 				return true
+			}
+			if len(configModel.Releases) > 0 && !sameReleaseList(model.pinnedReleases, configModel.Releases) {
+				log.Errorf("release pins for model %s differ from the image and were ignored. Publish a new router release to change them.", modelName)
 			}
 			log.Tracef("Updating config for model %s", modelName)
 			model.mu.Lock()

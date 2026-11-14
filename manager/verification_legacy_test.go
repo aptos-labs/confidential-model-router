@@ -2,20 +2,25 @@ package manager
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/tinfoilsh/confidential-model-router/config"
 	"github.com/tinfoilsh/tinfoil-go/verify/measurement"
 	legacyattestation "github.com/tinfoilsh/verifier/attestation"
 )
 
 const (
-	legacyTestRepo = "aptos-labs/confidential-glm-5-3-prod"
-	legacyTestTLS  = "aa"
-	legacyTestHPKE = "bb"
+	legacyTestRepo     = "aptos-labs/confidential-glm-5-3-prod"
+	legacyTestTLS      = "aa"
+	legacyTestHPKE     = "bb"
+	legacyTestDigest   = "47b4d1472a067966473ecdc0b79d3d92ffb2b9f19b81e92f37171cb961372252"
+	legacyTestHWDigest = "d80f92482bfffc1033d2e4b88c0df6e1090e8825d91d43715beb06742ec6a96b"
 )
 
 var (
@@ -35,6 +40,13 @@ type legacyFixture struct {
 	hardwareReads atomic.Int32
 	tag           string
 	digest        string
+	hwTag         string
+	hwDigest      string
+	codeBundle    string
+	hwBundle      string
+	repoClaim     string
+	omitCode      bool
+	omitHardware  bool
 }
 
 func newLegacyFixture() *legacyFixture {
@@ -52,8 +64,13 @@ func newLegacyFixture() *legacyFixture {
 			{ID: "other@x", MRTD: strings.Repeat("9", 96), RTMR0: strings.Repeat("9", 96)},
 			{ID: "large_1d_v011@x", MRTD: legacyTestMRTD, RTMR0: legacyTestRTMR0},
 		},
-		tag:    "v0.0.18",
-		digest: "digest-v0.0.18",
+		tag:        "v0.0.18",
+		digest:     legacyTestDigest,
+		hwTag:      "v0.0.47",
+		hwDigest:   legacyTestHWDigest,
+		codeBundle: `{"marker":"code"}`,
+		hwBundle:   `{"marker":"hardware"}`,
+		repoClaim:  legacyTestRepo,
 	}
 	f.verifier = &releaseVerifier{
 		sources:  map[string]*legacyattestation.Measurement{},
@@ -65,19 +82,49 @@ func newLegacyFixture() *legacyFixture {
 		verifyDocument: func(*legacyattestation.Document) (*legacyattestation.Verification, error) {
 			return &legacyattestation.Verification{Measurement: f.enclave, TLSPublicKeyFP: legacyTestTLS, HPKEPublicKey: legacyTestHPKE}, nil
 		},
-		latestTag:    func(string) (string, error) { return f.tag, nil },
-		digestForTag: func(string, string) (string, error) { return f.digest, nil },
-		latestDigest: func(string) (string, error) { return "hardware-digest", nil },
-		verifyRelease: func(string, string) (*legacyattestation.Measurement, error) {
+		fetchV3: func(context.Context, string) ([]byte, error) { return f.attestationV3(), nil },
+		verifyCode: func(bundle []byte, repo, tag, digest string) (*legacyattestation.Measurement, error) {
 			f.releaseChecks.Add(1)
+			if repo != legacyTestRepo || tag != "v0.0.18" || digest != legacyTestDigest || string(bundle) != f.codeBundle {
+				return nil, errors.New("unexpected code bundle")
+			}
 			return f.source, nil
 		},
-		fetchHardware: func(string) ([]*legacyattestation.HardwareMeasurement, error) {
+		verifyHardware: func(bundle []byte, repo, tag, digest string) ([]*legacyattestation.HardwareMeasurement, error) {
 			f.hardwareReads.Add(1)
+			if repo != hardwareMeasurementsRepo || tag != "v0.0.47" || digest != legacyTestHWDigest || string(bundle) != f.hwBundle {
+				return nil, errors.New("unexpected hardware bundle")
+			}
 			return f.hardware, nil
 		},
 	}
+	f.verifier.setPins(
+		map[string][]config.ReleasePin{legacyTestRepo: {{Tag: f.tag, Digest: f.digest}}},
+		[]config.ReleasePin{{Tag: f.hwTag, Digest: f.hwDigest}},
+	)
 	return f
+}
+
+func (f *legacyFixture) attestationV3() []byte {
+	var collateral []any
+	if !f.omitCode {
+		collateral = append(collateral, legacyReference("code-provenance", sigstoreCodeFormat, f.repoClaim, f.tag, f.digest, f.codeBundle))
+	}
+	if !f.omitHardware {
+		collateral = append(collateral, legacyReference("hardware-measurements", sigstoreHardwareFormat, hardwareMeasurementsRepo, f.hwTag, f.hwDigest, f.hwBundle))
+	}
+	body, err := json.Marshal(map[string]any{"collateral": collateral})
+	if err != nil {
+		panic(err)
+	}
+	return body
+}
+
+func legacyReference(id, format, repo, tag, digest, bundle string) map[string]any {
+	return map[string]any{
+		"id": id, "role": referenceValuesRole, "format": format, "subjects": []string{cpuCollateralSubject},
+		"data": map[string]any{"repo": repo, "tag": tag, "digest": digest, "sigstore_bundle": json.RawMessage(bundle)},
+	}
 }
 
 func (f *legacyFixture) verify(t *testing.T) (string, error) {
@@ -140,7 +187,9 @@ func TestLegacyVerificationRejects(t *testing.T) {
 		{"unknown hardware", func(f *legacyFixture) { f.hardware = f.hardware[:1] }, "hardware"},
 		{"hardware mrtd only", func(f *legacyFixture) { f.hardware[1].RTMR0 = strings.Repeat("9", 96) }, "hardware"},
 		{"release verification fails", func(f *legacyFixture) {
-			f.verifier.verifyRelease = func(string, string) (*legacyattestation.Measurement, error) { return nil, errors.New("bad bundle") }
+			f.verifier.verifyCode = func([]byte, string, string, string) (*legacyattestation.Measurement, error) {
+				return nil, errors.New("bad bundle")
+			}
 		}, "bad bundle"},
 		{"document verification fails", func(f *legacyFixture) {
 			f.verifier.verifyDocument = func(*legacyattestation.Document) (*legacyattestation.Verification, error) {
@@ -157,12 +206,17 @@ func TestLegacyVerificationRejects(t *testing.T) {
 				return &legacyattestation.Verification{Measurement: f.enclave}, nil
 			}
 		}, "TLS key"},
-		{"latest release unavailable", func(f *legacyFixture) {
-			f.verifier.latestTag = func(string) (string, error) { return "", errors.New("proxy down") }
-		}, "proxy down"},
-		{"hardware release unavailable", func(f *legacyFixture) {
-			f.verifier.latestDigest = func(string) (string, error) { return "", errors.New("hw proxy down") }
-		}, "hw proxy down"},
+		{"unpinned release", func(f *legacyFixture) {
+			f.tag = "v0.0.19"
+			f.digest = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+		}, "not pinned"},
+		{"unpinned hardware", func(f *legacyFixture) {
+			f.hwTag = "v0.0.48"
+			f.hwDigest = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+		}, "not pinned"},
+		{"provenance names another repo", func(f *legacyFixture) { f.repoClaim = "aptos-labs/other" }, "names"},
+		{"missing code provenance", func(f *legacyFixture) { f.omitCode = true }, "no code provenance"},
+		{"missing hardware provenance", func(f *legacyFixture) { f.omitHardware = true }, "no hardware"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -175,20 +229,22 @@ func TestLegacyVerificationRejects(t *testing.T) {
 	}
 }
 
-func TestLegacyVerificationTracksLatestRelease(t *testing.T) {
+func TestLegacyVerificationRejectsUnpinnedRelease(t *testing.T) {
 	f := newLegacyFixture()
 	if _, err := f.verify(t); err != nil {
 		t.Fatal(err)
 	}
-
-	// A newer release with a different measurement stops accepting the old enclave.
-	f.tag, f.digest = "v0.0.19", "digest-v0.0.19"
+	f.tag = "v0.0.19"
+	f.digest = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
 	f.source = &legacyattestation.Measurement{
 		Type:      legacyattestation.SnpTdxMultiPlatformV1,
-		Registers: []string{strings.Repeat("5", 96), legacyTestRTMR1, strings.Repeat("8", 96)},
+		Registers: []string{strings.Repeat("5", 96), legacyTestRTMR1, legacyTestRTMR2},
 	}
 	if _, err := f.verify(t); err == nil || !strings.Contains(err.Error(), "v0.0.19") {
-		t.Fatalf("old enclave accepted against newer release: %v", err)
+		t.Fatalf("unpinned release accepted: %v", err)
+	}
+	if f.releaseChecks.Load() != 1 {
+		t.Fatalf("unpinned release was sent to sigstore, checks = %d", f.releaseChecks.Load())
 	}
 }
 
@@ -203,20 +259,23 @@ func TestLegacyVerificationCachesImmutableReleaseData(t *testing.T) {
 		t.Fatalf("release checks = %d, hardware reads = %d; want 1 each", f.releaseChecks.Load(), f.hardwareReads.Load())
 	}
 
-	f.tag, f.digest = "v0.0.19", "digest-v0.0.19"
+	f.codeBundle = `{"marker":"replacement"}`
 	if _, err := f.verify(t); err != nil {
 		t.Fatal(err)
 	}
 	if f.releaseChecks.Load() != 2 {
-		t.Fatalf("a new digest must be verified, release checks = %d", f.releaseChecks.Load())
+		t.Fatalf("a new bundle must be verified, release checks = %d", f.releaseChecks.Load())
 	}
 }
 
 func TestLegacyVerificationChecksTdxPolicyOnly(t *testing.T) {
 	tdx := newLegacyFixture()
 	var checked atomic.Int32
-	tdx.verifier.checkTdx = func(context.Context, string, *legacyattestation.Document) error {
+	tdx.verifier.checkTdx = func(_ *legacyattestation.Document, v3 []byte) error {
 		checked.Add(1)
+		if !strings.Contains(string(v3), sigstoreCodeFormat) {
+			t.Fatal("TDX policy did not receive the v3 document")
+		}
 		return nil
 	}
 	if _, err := tdx.verify(t); err != nil {
@@ -228,7 +287,7 @@ func TestLegacyVerificationChecksTdxPolicyOnly(t *testing.T) {
 
 	sev := newLegacyFixture()
 	sev.enclave = &legacyattestation.Measurement{Type: legacyattestation.SevGuestV2, Registers: []string{sev.source.Registers[0]}}
-	sev.verifier.checkTdx = func(context.Context, string, *legacyattestation.Document) error {
+	sev.verifier.checkTdx = func(*legacyattestation.Document, []byte) error {
 		t.Fatal("SEV verification consulted the TDX policy")
 		return nil
 	}
@@ -262,5 +321,29 @@ func TestLegacyVerificationHonorsDeadline(t *testing.T) {
 	t.Cleanup(func() { legacyVerifyTimeout = original })
 	if _, err := f.verifier.verify("host.example", legacyTestRepo); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("err = %v, want deadline exceeded", err)
+	}
+}
+
+func TestBackendPinsAreRequiredToStart(t *testing.T) {
+	repos, catalog := defaultReleaseVerifier.pinSnapshot()
+	t.Cleanup(func() { defaultReleaseVerifier.setPins(repos, catalog) })
+
+	_, err := NewEnclaveManager([]byte("models:\n  glm:\n    repo: "+legacyTestRepo+"\n    enclaves: [h.example]\n"), "https://control.example", "", "", "", "", "", time.Minute, false)
+	if err == nil || !strings.Contains(err.Error(), "no pinned release") {
+		t.Fatalf("err = %v, want a missing pin", err)
+	}
+
+	body := fmt.Sprintf("hardware_measurements: [v0.0.47@%s]\nmodels:\n  glm:\n    repo: %s\n    releases: [v0.0.18@%s]\n    enclaves: [h.example]\n", legacyTestHWDigest, legacyTestRepo, legacyTestDigest)
+	em, err := NewEnclaveManager([]byte(body), "https://control.example", "", "", "", "", "", time.Minute, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pins, hardware, err := defaultReleaseVerifier.pinsFor(legacyTestRepo)
+	if err != nil || len(pins) != 1 || pins[0].Tag != "v0.0.18" || pins[0].Digest != legacyTestDigest || len(hardware) != 1 {
+		t.Fatalf("installed pins = %+v %+v err=%v", pins, hardware, err)
+	}
+	model, ok := em.GetModel("glm")
+	if !ok || len(model.pinnedReleases) != 1 || em.hardwarePins[0] != "v0.0.47@"+legacyTestHWDigest {
+		t.Fatalf("model pins = %+v hardware = %+v", model, em.hardwarePins)
 	}
 }

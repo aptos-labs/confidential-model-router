@@ -2,6 +2,8 @@ package manager
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,25 +13,25 @@ import (
 	"sync"
 	"time"
 
+	"github.com/tinfoilsh/confidential-model-router/config"
 	"github.com/tinfoilsh/tinfoil-go/verify"
 	"github.com/tinfoilsh/tinfoil-go/verify/document"
 	"github.com/tinfoilsh/tinfoil-go/verify/measurement"
 	legacyattestation "github.com/tinfoilsh/verifier/attestation"
-	legacygithub "github.com/tinfoilsh/verifier/github"
 	legacysigstore "github.com/tinfoilsh/verifier/sigstore"
 )
 
 // Verification of backends uses github.com/tinfoilsh/verifier, the standalone
-// verifier. It authenticates the enclave against the latest GitHub release of
-// the model repo (sigstore-attested RTMR1/RTMR2) and, for TDX, against the
-// latest tinfoilsh/hardware-measurements release (MRTD/RTMR0). The V3 SDK path
-// is not used because it requires platform and freshness witnesses that only
-// Tinfoil's release workflows can sign.
+// verifier. The v3 attestation carries the sigstore-code bundle and the
+// hardware-measurements bundle. Each is checked against a tag and digest pinned
+// in the router image. GitHub's latest release is not consulted. The V3 SDK
+// path is not used because it requires platform and freshness witnesses that
+// only Tinfoil's release workflows can sign.
 //
 // The standalone verifier has no signed freshness witness. FreshnessExpiresAt
 // is therefore a router-local bound on how long one successful verification may
 // authorize new requests; the refresh cadence in attestationRefreshDue keeps it
-// well ahead of that bound while upstream sources are reachable.
+// well ahead of that bound while the backend remains reachable.
 //
 // For TDX, the v3 attestation's captured Intel collateral is replayed as well.
 // That checks TCB status, revocation, and the module policy. Its nextUpdate is
@@ -43,7 +45,7 @@ const (
 	legacyVerifierVersion    = "v0.10.11"
 )
 
-// Bounds one full verification, including GitHub and sigstore fetches. Var for tests.
+// Bounds one full verification, including the sigstore trust-root fetch. Var for tests.
 var legacyVerifyTimeout = time.Minute
 
 type releaseVerifier struct {
@@ -52,16 +54,16 @@ type releaseVerifier struct {
 	sigstoreAt time.Time
 	sources    map[string]*legacyattestation.Measurement
 	hardware   map[string][]*legacyattestation.HardwareMeasurement
+	repos      map[string][]config.ReleasePin
+	catalog    []config.ReleasePin
 
 	now            func() time.Time
 	fetchDocument  func(ctx context.Context, host string) (*legacyattestation.Document, error)
 	verifyDocument func(*legacyattestation.Document) (*legacyattestation.Verification, error)
-	latestTag      func(repo string) (string, error)
-	digestForTag   func(repo, tag string) (string, error)
-	latestDigest   func(repo string) (string, error)
-	verifyRelease  func(repo, digest string) (*legacyattestation.Measurement, error)
-	fetchHardware  func(digest string) ([]*legacyattestation.HardwareMeasurement, error)
-	checkTdx       func(ctx context.Context, host string, doc *legacyattestation.Document) error
+	fetchV3        func(ctx context.Context, host string) ([]byte, error)
+	verifyCode     func(bundle []byte, repo, tag, digest string) (*legacyattestation.Measurement, error)
+	verifyHardware func(bundle []byte, repo, tag, digest string) ([]*legacyattestation.HardwareMeasurement, error)
+	checkTdx       func(doc *legacyattestation.Document, v3 []byte) error
 }
 
 var defaultReleaseVerifier = newReleaseVerifier()
@@ -70,15 +72,14 @@ func newReleaseVerifier() *releaseVerifier {
 	r := &releaseVerifier{
 		sources:        map[string]*legacyattestation.Measurement{},
 		hardware:       map[string][]*legacyattestation.HardwareMeasurement{},
+		repos:          map[string][]config.ReleasePin{},
 		now:            time.Now,
 		fetchDocument:  fetchAttestationDocument,
 		verifyDocument: (*legacyattestation.Document).Verify,
-		latestTag:      legacygithub.FetchLatestTag,
-		digestForTag:   legacygithub.FetchDigest,
-		latestDigest:   legacygithub.FetchLatestDigest,
+		fetchV3:        fetchAttestationV3,
 	}
-	r.verifyRelease = r.verifySigstoreRelease
-	r.fetchHardware = r.fetchSigstoreHardware
+	r.verifyCode = r.verifySigstoreCode
+	r.verifyHardware = r.verifySigstoreHardware
 	r.checkTdx = r.checkTdxPolicy
 	return r
 }
@@ -87,9 +88,9 @@ func verifyEnclave(host, repo string) (*verify.Verification, error) {
 	return defaultReleaseVerifier.verify(host, repo)
 }
 
-// verify bounds the whole verification. The standalone verifier's GitHub and
-// sigstore helpers use the default HTTP client without deadlines, so the work
-// runs in a goroutine that is abandoned when the deadline passes.
+// verify bounds the whole verification. Sigstore trust-root loading uses the
+// default HTTP client without a deadline, so the work runs in a goroutine that
+// is abandoned when the deadline passes.
 func (r *releaseVerifier) verify(host, repo string) (*verify.Verification, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), legacyVerifyTimeout)
 	defer cancel()
@@ -115,6 +116,10 @@ func (r *releaseVerifier) verifyWithin(ctx context.Context, host, repo string) (
 	if err != nil {
 		return nil, fmt.Errorf("fetching attestation: %w", err)
 	}
+	codePins, hardwarePins, err := r.pinsFor(repo)
+	if err != nil {
+		return nil, err
+	}
 	verified, err := r.verifyDocument(doc)
 	if err != nil {
 		return nil, fmt.Errorf("verifying attestation document: %w", err)
@@ -126,16 +131,29 @@ func (r *releaseVerifier) verifyWithin(ctx context.Context, host, repo string) (
 		return nil, errors.New("verified attestation has no TLS key fingerprint")
 	}
 
-	tag, source, err := r.latestSource(repo)
+	v3, err := r.fetchV3(ctx, host)
+	if err != nil {
+		return nil, fmt.Errorf("fetching v3 attestation: %w", err)
+	}
+	code, err := codeReference(v3, repo)
 	if err != nil {
 		return nil, err
 	}
-	if err := verified.Measurement.Equals(source); err != nil {
-		return nil, fmt.Errorf("enclave does not match %s@%s: %w", repo, tag, err)
+	pin, ok := findReleasePin(codePins, code.tag, code.digest)
+	if !ok {
+		return nil, fmt.Errorf("release %s@%s is not pinned for %s", code.tag, code.digest, repo)
 	}
+	source, err := r.cachedCode(code.bundle, repo, pin.Tag, pin.Digest)
+	if err != nil {
+		return nil, fmt.Errorf("verifying release attestation of %s@%s: %w", repo, pin.Tag, err)
+	}
+	if err := verified.Measurement.Equals(source); err != nil {
+		return nil, fmt.Errorf("enclave does not match %s@%s: %w", repo, pin.Tag, err)
+	}
+	tag := pin.Tag
 	if verified.Measurement.Type == legacyattestation.TdxGuestV2 {
 		if r.checkTdx != nil {
-			if err := r.checkTdx(ctx, host, doc); err != nil {
+			if err := r.checkTdx(doc, v3); err != nil {
 				return nil, fmt.Errorf("checking TDX platform policy: %w", err)
 			}
 		}
@@ -144,9 +162,17 @@ func (r *releaseVerifier) verifyWithin(ctx context.Context, host, repo string) (
 		if len(verified.Measurement.Registers) != 5 || verified.Measurement.Registers[4] != measurement.RTMR3_ZERO {
 			return nil, errors.New("TDX RTMR3 is not zero")
 		}
-		hardware, err := r.latestHardware()
+		catalog, err := hardwareReference(v3)
 		if err != nil {
 			return nil, err
+		}
+		hardwarePin, ok := findReleasePin(hardwarePins, catalog.tag, catalog.digest)
+		if !ok {
+			return nil, fmt.Errorf("hardware measurements %s@%s are not pinned", catalog.tag, catalog.digest)
+		}
+		hardware, err := r.cachedHardware(catalog.bundle, hardwareMeasurementsRepo, hardwarePin.Tag, hardwarePin.Digest)
+		if err != nil {
+			return nil, fmt.Errorf("verifying hardware measurements release: %w", err)
 		}
 		if _, err := legacyattestation.VerifyHardware(hardware, verified.Measurement); err != nil {
 			return nil, fmt.Errorf("verifying hardware measurements: %w", err)
@@ -197,82 +223,68 @@ func (r *releaseVerifier) sigstoreClient() (*legacysigstore.Client, error) {
 	return client, nil
 }
 
-// latestSource returns the sigstore-verified measurement of the repo's latest
-// release. Verified measurements are cached by digest because a release's
-// attestation is immutable; the latest tag is always re-read.
-func (r *releaseVerifier) latestSource(repo string) (string, *legacyattestation.Measurement, error) {
-	tag, err := r.latestTag(repo)
-	if err != nil {
-		return "", nil, fmt.Errorf("fetching latest release of %s: %w", repo, err)
-	}
-	digest, err := r.digestForTag(repo, tag)
-	if err != nil {
-		return "", nil, fmt.Errorf("fetching digest of %s@%s: %w", repo, tag, err)
-	}
-	key := repo + "@" + digest
+// cachedCode verifies the bundle carried in the attestation, then remembers
+// the result for those exact bytes. A later document that names the same
+// digest with a different bundle is verified again.
+func (r *releaseVerifier) cachedCode(bundle []byte, repo, tag, digest string) (*legacyattestation.Measurement, error) {
+	key := bundleCacheKey(repo, tag, digest, bundle)
 	r.mu.Lock()
 	cached := r.sources[key]
 	r.mu.Unlock()
 	if cached != nil {
-		return tag, cached, nil
+		return cached, nil
 	}
-	source, err := r.verifyRelease(repo, digest)
+	source, err := r.verifyCode(bundle, repo, tag, digest)
 	if err != nil {
-		return "", nil, fmt.Errorf("verifying release attestation of %s@%s: %w", repo, tag, err)
+		return nil, err
 	}
 	r.mu.Lock()
 	r.sources[key] = source
 	r.mu.Unlock()
-	return tag, source, nil
+	return source, nil
 }
 
-func (r *releaseVerifier) latestHardware() ([]*legacyattestation.HardwareMeasurement, error) {
-	digest, err := r.latestDigest(hardwareMeasurementsRepo)
-	if err != nil {
-		return nil, fmt.Errorf("fetching latest hardware measurements: %w", err)
-	}
+func (r *releaseVerifier) cachedHardware(bundle []byte, repo, tag, digest string) ([]*legacyattestation.HardwareMeasurement, error) {
+	key := bundleCacheKey(repo, tag, digest, bundle)
 	r.mu.Lock()
-	cached := r.hardware[digest]
+	cached := r.hardware[key]
 	r.mu.Unlock()
 	if cached != nil {
 		return cached, nil
 	}
-	hardware, err := r.fetchHardware(digest)
+	hardware, err := r.verifyHardware(bundle, repo, tag, digest)
 	if err != nil {
-		return nil, fmt.Errorf("verifying hardware measurements release: %w", err)
+		return nil, err
 	}
 	r.mu.Lock()
-	r.hardware[digest] = hardware
+	r.hardware[key] = hardware
 	r.mu.Unlock()
 	return hardware, nil
 }
 
-func (r *releaseVerifier) verifySigstoreRelease(repo, digest string) (*legacyattestation.Measurement, error) {
+func bundleCacheKey(repo, tag, digest string, bundle []byte) string {
+	sum := sha256.Sum256(bundle)
+	return repo + "\x00" + tag + "\x00" + digest + "\x00" + hex.EncodeToString(sum[:])
+}
+
+func (r *releaseVerifier) verifySigstoreCode(bundle []byte, repo, tag, digest string) (*legacyattestation.Measurement, error) {
 	client, err := r.sigstoreClient()
 	if err != nil {
 		return nil, err
 	}
-	bundle, err := legacygithub.FetchAttestationBundle(repo, digest)
-	if err != nil {
-		return nil, fmt.Errorf("fetching attestation bundle: %w", err)
-	}
-	return client.VerifyAttestation(bundle, digest, repo)
+	return client.VerifyPinnedAttestation(bundle, digest, repo, tag)
 }
 
-func (r *releaseVerifier) fetchSigstoreHardware(digest string) ([]*legacyattestation.HardwareMeasurement, error) {
+func (r *releaseVerifier) verifySigstoreHardware(bundle []byte, repo, tag, digest string) ([]*legacyattestation.HardwareMeasurement, error) {
 	client, err := r.sigstoreClient()
 	if err != nil {
 		return nil, err
 	}
-	return client.FetchHardwareMeasurements(hardwareMeasurementsRepo, digest)
+	return client.VerifyPinnedHardware(bundle, digest, repo, tag)
 }
 
-func (r *releaseVerifier) checkTdxPolicy(ctx context.Context, host string, doc *legacyattestation.Document) error {
-	body, err := fetchAttestationV3(ctx, host)
-	if err != nil {
-		return err
-	}
-	return verifyCapturedTdxPolicy(doc.Body, body, r.now())
+func (r *releaseVerifier) checkTdxPolicy(doc *legacyattestation.Document, v3 []byte) error {
+	return verifyCapturedTdxPolicy(doc.Body, v3, r.now())
 }
 
 // fetchAttestationDocument disables connection reuse so backends that share an

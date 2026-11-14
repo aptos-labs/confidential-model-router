@@ -282,3 +282,25 @@ func TestReservationConfigRejectsInvalidPools(t *testing.T) {
 		})
 	}
 }
+
+func TestReleasePins(t *testing.T) {
+	const digest = "47b4d1472a067966473ecdc0b79d3d92ffb2b9f19b81e92f37171cb961372252"
+	cfg, err := FromBytes([]byte("hardware_measurements: [v0.0.47@" + digest + "]\nmodels:\n  glm:\n    repo: aptos-labs/example\n    releases: [v0.0.18@" + digest + "]\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.HardwareMeasurements) != 1 || len(cfg.Models["glm"].Releases) != 1 {
+		t.Fatalf("pins were not kept: %+v", cfg)
+	}
+	for _, raw := range []string{"latest", "v0.0.18", "v0.0.18@" + strings.ToUpper(digest), "sha256:" + digest + "@" + digest, "v0.0.18@" + digest + ",v0.0.18@" + digest} {
+		t.Run(raw, func(t *testing.T) {
+			data := "models:\n  glm:\n    releases: [" + raw + "]\n"
+			if strings.Contains(raw, ",") {
+				data = "models:\n  glm:\n    releases: [" + strings.ReplaceAll(raw, ",", ", ") + "]\n"
+			}
+			if _, err := FromBytes([]byte(data)); err == nil {
+				t.Fatalf("accepted %s", raw)
+			}
+		})
+	}
+}
