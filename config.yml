@@ -10,10 +10,13 @@ hardware_measurements:
 models:
   glm-5.3:
     repo: aptos-labs/confidential-glm-5-3-prod
-    # aptos-labs/confidential-glm-5-3-prod v0.0.18. Older ATC-allowed tags are
-    # not accepted until their artifact digests are pinned here.
+    # aptos-labs/confidential-glm-5-3-prod v0.0.18 and v0.0.19. Both stay pinned
+    # while the hosts move to v0.0.19 one at a time; drop v0.0.18 after that.
+    # Older ATC-allowed tags are not accepted until their artifact digests are
+    # pinned here.
     releases:
       - v0.0.18@47b4d1472a067966473ecdc0b79d3d92ffb2b9f19b81e92f37171cb961372252
+      - v0.0.19@8ef040162fbccecf54a7ad2c7602908b9f8535fa307cc092ea7a03bcd84cf2d5
     backend_auth_env: GLM_BACKEND_API_KEY
     enclaves:
       - host1.inference.aptoslabs.com
