@@ -67,6 +67,8 @@ func tlsAddress(host string) string {
 
 // attestedTransport rejects new requests once the authenticated witness expires,
 // including requests on pooled connections and caller-managed MCP sessions.
+// Every backend request passes through it, so it also drops client-sent vLLM
+// control headers (see vllmHeaderPrefix).
 type attestedTransport struct {
 	*enclave.TLSBoundRoundTripper
 	attestation *attestationState
@@ -86,5 +88,5 @@ func (t *attestedTransport) RoundTrip(req *http.Request) (*http.Response, error)
 		}
 		return nil, &enclave.AttestationError{Err: errAttestationExpired}
 	}
-	return t.TLSBoundRoundTripper.RoundTrip(req)
+	return t.TLSBoundRoundTripper.RoundTrip(withoutVLLMHeaders(req))
 }
