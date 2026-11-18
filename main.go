@@ -928,6 +928,7 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 				// Strip any user-supplied priority to prevent circumventing rate limits
 				// or jumping ahead of other users.
 				delete(body, "priority")
+				stripVLLMInternalFields(body)
 
 				// Admit before any internal dispatch (file conversion, tool
 				// loop) so they all reuse this request's context and
@@ -1079,6 +1080,7 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 			if speechBody != nil {
 				// Speech does not support cache salting.
 				applyCacheSalt(speechBody, r.URL.Path, apiKey, false)
+				stripVLLMInternalFields(speechBody)
 				admission.applyPriority(speechBody, r.URL.Path, modelName)
 				if err := replaceJSONBody(r, speechBody); err != nil {
 					writeError(w, &manager.ErrServer)
