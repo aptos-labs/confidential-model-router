@@ -68,6 +68,16 @@ func TestCapturedTdxPolicyRejects(t *testing.T) {
 	}
 }
 
+func TestTdxModulePolicyAcceptsB300HostModule(t *testing.T) {
+	quote, err := quoteFromV2Body(v2Fixture(t, "testdata/tdx-v2-b300.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := applyTdxModulePolicy(quote); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestTdxModulePolicyRejectsMutations(t *testing.T) {
 	_, v3 := tdxFixtures(t)
 	quote, _, err := quoteFromV3Document(v3)
@@ -127,22 +137,28 @@ func TestCollateralMatchIgnoresExtraParameters(t *testing.T) {
 
 func tdxFixtures(t *testing.T) (string, []byte) {
 	t.Helper()
-	v2Raw, err := os.ReadFile("testdata/tdx-v2.json")
+	v2 := v2Fixture(t, "testdata/tdx-v2.json")
+	v3, err := os.ReadFile("testdata/tdx-v3.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return v2, v3
+}
+
+func v2Fixture(t *testing.T, path string) string {
+	t.Helper()
+	raw, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	var v2 struct {
 		Body string `json:"body"`
 	}
-	if err := json.Unmarshal(v2Raw, &v2); err != nil {
-		t.Fatal(err)
-	}
-	v3, err := os.ReadFile("testdata/tdx-v3.json")
-	if err != nil {
+	if err := json.Unmarshal(raw, &v2); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := base64.StdEncoding.DecodeString(v2.Body); err != nil {
 		t.Fatal(err)
 	}
-	return v2.Body, v3
+	return v2.Body
 }
