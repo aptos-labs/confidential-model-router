@@ -2,6 +2,7 @@ package manager
 
 import (
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"os"
 	"strings"
@@ -68,16 +69,6 @@ func TestCapturedTdxPolicyRejects(t *testing.T) {
 	}
 }
 
-func TestTdxModulePolicyAcceptsB300HostModule(t *testing.T) {
-	quote, err := quoteFromV2Body(v2Fixture(t, "testdata/tdx-v2-b300.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := applyTdxModulePolicy(quote); err != nil {
-		t.Fatal(err)
-	}
-}
-
 func TestTdxModulePolicyRejectsMutations(t *testing.T) {
 	_, v3 := tdxFixtures(t)
 	quote, _, err := quoteFromV3Document(v3)
@@ -103,6 +94,24 @@ func TestTdxModulePolicyRejectsMutations(t *testing.T) {
 				t.Fatal("mutated quote was accepted")
 			}
 		})
+	}
+}
+
+func TestTdxModulePolicyAcceptsModule2020(t *testing.T) {
+	_, v3 := tdxFixtures(t)
+	quote, _, err := quoteFromV3Document(v3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// MRSEAM from Intel's TDX_MODULE_2.0.20 release notes.
+	mrSeam, err := hex.DecodeString("57a1a66f3704887a9fbf64aae610421bc10d428c5e0eb10acd0e3cab8363cd8a1a92e276f3238a5c6c7a9c95a2c0fc82")
+	if err != nil {
+		t.Fatal(err)
+	}
+	module := proto.Clone(quote).(*pb.QuoteV4)
+	module.TdQuoteBody.MrSeam = mrSeam
+	if err := applyTdxModulePolicy(module); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -137,28 +146,22 @@ func TestCollateralMatchIgnoresExtraParameters(t *testing.T) {
 
 func tdxFixtures(t *testing.T) (string, []byte) {
 	t.Helper()
-	v2 := v2Fixture(t, "testdata/tdx-v2.json")
-	v3, err := os.ReadFile("testdata/tdx-v3.json")
-	if err != nil {
-		t.Fatal(err)
-	}
-	return v2, v3
-}
-
-func v2Fixture(t *testing.T, path string) string {
-	t.Helper()
-	raw, err := os.ReadFile(path)
+	v2Raw, err := os.ReadFile("testdata/tdx-v2.json")
 	if err != nil {
 		t.Fatal(err)
 	}
 	var v2 struct {
 		Body string `json:"body"`
 	}
-	if err := json.Unmarshal(raw, &v2); err != nil {
+	if err := json.Unmarshal(v2Raw, &v2); err != nil {
+		t.Fatal(err)
+	}
+	v3, err := os.ReadFile("testdata/tdx-v3.json")
+	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := base64.StdEncoding.DecodeString(v2.Body); err != nil {
 		t.Fatal(err)
 	}
-	return v2.Body
+	return v2.Body, v3
 }
