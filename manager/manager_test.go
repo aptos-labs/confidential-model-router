@@ -21,7 +21,7 @@ func newTestEnclave(host string) *Enclave {
 	return &Enclave{
 		host:    host,
 		cb:      newCircuitBreaker(),
-		metrics: newEnclaveMetrics(host, "test-model"),
+		metrics: newEnclaveMetrics(host, "test-model", "", nil),
 	}
 }
 

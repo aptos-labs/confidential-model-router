@@ -356,14 +356,17 @@ func TestBackendAuthMetricsCredentialsSeparate(t *testing.T) {
 	SetMetricsPollAPIKey("metrics-test")
 	auths := make(chan string, 1)
 	server := newBackendTLSServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/health" {
+			return
+		}
 		auths <- r.Header.Get("Authorization")
 		fmt.Fprintln(w, "vllm:num_requests_waiting 0")
 	}))
 	defer server.Close()
+	trustBackendTLSFixture(t, server)
 	host := strings.TrimPrefix(server.URL, "https://")
 	credentials := testBackendCredentials(t, host)
-	m := newEnclaveMetrics(host, "selected")
-	m.client = server.Client()
+	m := newEnclaveMetrics(host, "selected", testBackendFingerprint(t, server), nil)
 	m.scrape(withBackendCredentials(context.Background(), credentials, "selected"))
 	if <-auths != "Bearer metrics-test" {
 		t.Fatal("metrics credential replaced by inference credential")

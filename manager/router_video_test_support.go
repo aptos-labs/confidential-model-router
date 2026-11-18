@@ -34,7 +34,7 @@ func NewVideoRouterTestManager(backends map[string]http.Handler) *EnclaveManager
 // a metrics poller. The model's Overload policy must trip at this depth.
 // Call only while setting up the fixture, before serving.
 func (e *Enclave) SetVideoRouterTestOverloaded() {
-	e.metrics = newEnclaveMetrics(e.host, e.modelName)
+	e.metrics = newEnclaveMetrics(e.host, e.modelName, e.tlsKeyFP, e.attestation)
 	e.metrics.updateLatest(requestCounts{waiting: 5, hasWaiting: true}, time.Now())
 }
 

@@ -16,7 +16,7 @@ import (
 
 // newTestMetrics installs the real policy state without starting a poller.
 func newTestMetrics(host string, policy *config.OverloadConfig) *enclaveMetrics {
-	m := newEnclaveMetrics(host, "test-model")
+	m := newEnclaveMetrics(host, "test-model", "", nil)
 	m.configurePolicies(policy, nil)
 	return m
 }
