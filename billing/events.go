@@ -29,24 +29,16 @@ type Event struct {
 	Enclave            string    `json:"enclave"`
 	RequestPath        string    `json:"request_path"`
 	Streaming          bool      `json:"streaming"`
-	APIKey             string    `json:"api_key"`
-	CustomerRequests   int64     `json:"customer_requests"`
+	// APIKey goes only to the usage reporter. It is never JSON-encoded: the
+	// billing log line is the JSON form, and no part of a key may reach a log.
+	APIKey           string `json:"-"`
+	CustomerRequests int64  `json:"customer_requests"`
 }
 
 // Collector ships billing events to the control plane via the usage reporter.
 type Collector struct {
 	reporter *usageclient.ReporterClient
 	stopOnce sync.Once
-}
-
-// maskAPIKey masks an API key for safe logging
-// Shows first 3 and last 4 characters, masking the rest
-func maskAPIKey(apiKey string) string {
-	if len(apiKey) <= 10 {
-		// Too short to mask safely
-		return "***"
-	}
-	return apiKey[:3] + strings.Repeat("*", len(apiKey)-7) + apiKey[len(apiKey)-4:]
 }
 
 // NewCollector creates a new billing event collector.
@@ -69,14 +61,10 @@ func NewCollector(controlPlaneURL, reporterID, reporterSecret string) *Collector
 	return c
 }
 
-// AddEvent forwards a billing event to the usage reporter and writes a
-// masked log line for local observability.
+// AddEvent forwards a billing event to the usage reporter and writes a log
+// line, without the API key, for local observability.
 func (c *Collector) AddEvent(event Event) {
-	// Create a safe version for logging with masked API key
-	safeEvent := event
-	safeEvent.APIKey = maskAPIKey(event.APIKey)
-
-	eventJSON, err := json.Marshal(safeEvent)
+	eventJSON, err := json.Marshal(event)
 	if err != nil {
 		log.WithError(err).Error("Failed to marshal billing event")
 		return
