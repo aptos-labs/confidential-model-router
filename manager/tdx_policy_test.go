@@ -103,8 +103,9 @@ func TestTdxModulePolicyAcceptsModule2020(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// MRSEAM from Intel's TDX_MODULE_2.0.20 release notes.
-	mrSeam, err := hex.DecodeString("57a1a66f3704887a9fbf64aae610421bc10d428c5e0eb10acd0e3cab8363cd8a1a92e276f3238a5c6c7a9c95a2c0fc82")
+	// SHA-384 of intel_tdx_module.so in Intel's TDX_MODULE_2.0.20 release. The
+	// B300 host's quotes report this MRSEAM.
+	mrSeam, err := hex.DecodeString("eddfa0c1750b39ba6c9b039c579a5039baea307f8290fc5e3636d70e6001749dc95a368b9d8a9c50c84d1c22b5642d3c")
 	if err != nil {
 		t.Fatal(err)
 	}
