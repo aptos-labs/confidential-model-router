@@ -212,6 +212,16 @@ func getEnvOrDefault(envKey, defaultVal string) string {
 	return defaultVal
 }
 
+// secretFlagOrEnv returns a secret flag's parsed value, else its env var. A
+// secret never becomes a flag default: -h and flag-parse errors print
+// defaults verbatim.
+func secretFlagOrEnv(value, envKey string) string {
+	if value != "" {
+		return value
+	}
+	return os.Getenv(envKey)
+}
+
 // getEnvOrDefaultDuration returns the environment variable value parsed as a duration if set, otherwise returns the default
 func getEnvOrDefaultDuration(envKey string, defaultVal time.Duration) time.Duration {
 	if val := os.Getenv(envKey); val != "" {
@@ -234,8 +244,8 @@ var (
 	port                = flag.String("l", getEnvOrDefault("PORT", "8089"), "port to listen on (env: PORT)")
 	controlPlaneURL     = flag.String("C", getEnvOrDefault("CONTROL_PLANE_URL", "https://api.tinfoil.sh"), "control plane URL (env: CONTROL_PLANE_URL)")
 	usageReporterID     = flag.String("usage-reporter-id", getEnvOrDefault("USAGE_REPORTER_ID", "model-router"), "usage reporter ID (env: USAGE_REPORTER_ID)")
-	usageReporterSecret = flag.String("usage-reporter-secret", getEnvOrDefault("USAGE_REPORTER_SECRET", ""), "usage reporter HMAC secret (env: USAGE_REPORTER_SECRET)")
-	usageContextSecret  = flag.String("usage-context-secret", getEnvOrDefault("USAGE_CONTEXT_SECRET", ""), "usage-context HMAC secret used to verify the chat harness's request-context and sign request-context propagated to tool services (env: USAGE_CONTEXT_SECRET)")
+	usageReporterSecret = flag.String("usage-reporter-secret", "", "usage reporter HMAC secret (env: USAGE_REPORTER_SECRET)")
+	usageContextSecret  = flag.String("usage-context-secret", "", "usage-context HMAC secret used to verify the chat harness's request-context and sign request-context propagated to tool services (env: USAGE_CONTEXT_SECRET)")
 	verbose             = flag.Bool("v", getEnvBool("VERBOSE"), "enable verbose logging (env: VERBOSE)")
 	initConfigURL       = flag.String("i", getEnvOrDefault("INIT_CONFIG_URL", ""), "optional path to initial config.yml (requires to append @sha256:<hex> for integrity) (env: INIT_CONFIG_URL)")
 	updateConfigURL     = flag.String("u", getEnvOrDefault("UPDATE_CONFIG_URL", "https://raw.githubusercontent.com/tinfoilsh/confidential-model-router/main/config.yml"), "path to runtime config.yml (env: UPDATE_CONFIG_URL)")
@@ -504,10 +514,12 @@ func main() {
 	log.Debugf("Configuration: port=%s, controlPlaneURL=%s", *port, *controlPlaneURL)
 	log.Infof("Refresh interval: %s", *refreshInterval)
 
-	if *usageReporterSecret == "" {
+	reporterSecret := secretFlagOrEnv(*usageReporterSecret, "USAGE_REPORTER_SECRET")
+	if reporterSecret == "" {
 		log.Fatal("USAGE_REPORTER_SECRET is required")
 	}
-	if *usageContextSecret == "" {
+	contextSecret := secretFlagOrEnv(*usageContextSecret, "USAGE_CONTEXT_SECRET")
+	if contextSecret == "" {
 		log.Fatal("USAGE_CONTEXT_SECRET is required")
 	}
 
@@ -534,7 +546,7 @@ func main() {
 		manager.SetMetricsPollAPIKey(strings.TrimSpace(key))
 	}
 
-	em, err := manager.NewEnclaveManager(configFile, *controlPlaneURL, *usageReporterID, *usageReporterSecret, *usageContextSecret, *initConfigURL, *updateConfigURL, *refreshInterval, *debug)
+	em, err := manager.NewEnclaveManager(configFile, *controlPlaneURL, *usageReporterID, reporterSecret, contextSecret, *initConfigURL, *updateConfigURL, *refreshInterval, *debug)
 	if err != nil {
 		log.Fatal(err)
 	}
