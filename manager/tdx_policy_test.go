@@ -2,6 +2,7 @@ package manager
 
 import (
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"os"
 	"strings"
@@ -93,6 +94,28 @@ func TestTdxModulePolicyRejectsMutations(t *testing.T) {
 				t.Fatal("mutated quote was accepted")
 			}
 		})
+	}
+}
+
+func TestTdxModulePolicyAcceptsModule2020(t *testing.T) {
+	_, v3 := tdxFixtures(t)
+	quote, _, err := quoteFromV3Document(v3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// SHA-384 of intel_tdx_module.so in Intel's TDX_MODULE_2.0.20 release. The
+	// B300 host's quotes report this MRSEAM.
+	mrSeam, err := hex.DecodeString("eddfa0c1750b39ba6c9b039c579a5039baea307f8290fc5e3636d70e6001749dc95a368b9d8a9c50c84d1c22b5642d3c")
+	if err != nil {
+		t.Fatal(err)
+	}
+	module := proto.Clone(quote).(*pb.QuoteV4)
+	module.TdQuoteBody.MrSeam = mrSeam
+	// The B300 host reports TEE_TCB_SVN 09 03 08: module minor 9, major 3.
+	// The fixture quote carries a 1.5-line value, so set the real one too.
+	module.TdQuoteBody.TeeTcbSvn = append([]byte{0x09, 0x03, 0x08}, make([]byte, 13)...)
+	if err := applyTdxModulePolicy(module); err != nil {
+		t.Fatal(err)
 	}
 }
 
