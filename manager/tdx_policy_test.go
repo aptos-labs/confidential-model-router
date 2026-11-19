@@ -111,6 +111,9 @@ func TestTdxModulePolicyAcceptsModule2020(t *testing.T) {
 	}
 	module := proto.Clone(quote).(*pb.QuoteV4)
 	module.TdQuoteBody.MrSeam = mrSeam
+	// The B300 host reports TEE_TCB_SVN 09 03 08: module minor 9, major 3.
+	// The fixture quote carries a 1.5-line value, so set the real one too.
+	module.TdQuoteBody.TeeTcbSvn = append([]byte{0x09, 0x03, 0x08}, make([]byte, 13)...)
 	if err := applyTdxModulePolicy(module); err != nil {
 		t.Fatal(err)
 	}
