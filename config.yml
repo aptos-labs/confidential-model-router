@@ -30,3 +30,19 @@ models:
       min_prompt_bytes: 4096
       split_threshold_rpm: 10
       max_inflight_delta: 2
+
+  kimi-k3-1-pro:
+    repo: aptos-labs/confidential-kimi-k3-1-pro-prod
+    # aptos-labs/confidential-kimi-k3-1-pro-prod v0.0.1 on the 8x B300 host.
+    # The host boots Intel TDX module 2.0.20 (see acceptedMrSeams).
+    releases:
+      - v0.0.1@df4b35afb63cf0d529666ea392401ffdeb4b1c90342c4e0deb16e00b2f94ffc6
+    backend_auth_env: KIMI_BACKEND_API_KEY
+    enclaves:
+      - host2.inference.aptoslabs.com
+    # One host, so no cache_route block. The backend runs up to 32 requests
+    # at once (--max-num-seqs 32).
+    overload:
+      max_requests_waiting: 20
+      clear_requests_waiting: 10
+      retry_after_minutes: 1

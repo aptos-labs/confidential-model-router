@@ -17,6 +17,7 @@ networks:
       - api.inference.aptoslabs.com
       - host0.inference.aptoslabs.com
       - host1.inference.aptoslabs.com
+      - host2.inference.aptoslabs.com
 
 containers:
   - name: router
@@ -34,6 +35,7 @@ containers:
       - USAGE_REPORTER_SECRET
       - USAGE_CONTEXT_SECRET
       - GLM_BACKEND_API_KEY
+      - KIMI_BACKEND_API_KEY
       - METRICS_API_KEY
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:8089/health"]
