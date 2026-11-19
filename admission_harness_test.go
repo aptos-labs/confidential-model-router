@@ -374,8 +374,13 @@ func TestAdmissionHandlerEntryPoints(t *testing.T) {
 					handler.warm("tk_test", tc.model)
 					<-admissions
 					beforeCP, beforeBackend := cpCalls.Load(), backendCalls.Load()
-					r := admissionRequest(tc.path, tc.body, "tk_test")
+					reqBody := tc.body
+					if !tc.raw && !tc.upgrade {
+						reqBody = "{" + vllmInternalFieldsJSON + "," + strings.TrimPrefix(tc.body, "{")
+					}
+					r := admissionRequest(tc.path, reqBody, "tk_test")
 					r.Header.Set("X-Tinfoil-Root-Request-Id", "client-chosen-id")
+					r.Header.Set("X-Vllm-Priority", "-100")
 					if tc.contentType != "" {
 						r.Header.Set("Content-Type", tc.contentType)
 					}
@@ -416,6 +421,11 @@ func TestAdmissionHandlerEntryPoints(t *testing.T) {
 					if forwarded.header.Get("Authorization") != "Bearer tk_test" {
 						t.Fatal("original auth lost")
 					}
+					for name := range forwarded.header {
+						if strings.HasPrefix(strings.ToLower(name), "x-vllm-") {
+							t.Fatalf("client header %s reached the backend", name)
+						}
+					}
 					if tc.upgrade {
 						if forwarded.header.Get("Upgrade") != "websocket" || forwarded.header.Get("Sec-WebSocket-Protocol") != "realtime" {
 							t.Fatalf("upgrade headers: %v", forwarded.header)
@@ -431,6 +441,11 @@ func TestAdmissionHandlerEntryPoints(t *testing.T) {
 					var body map[string]json.RawMessage
 					if err := json.Unmarshal(forwarded.body, &body); err != nil {
 						t.Fatal(err)
+					}
+					for _, field := range vllmInternalFields {
+						if _, exists := body[field]; exists {
+							t.Fatalf("client %s reached the backend: %s", field, forwarded.body)
+						}
 					}
 					var sent map[string]json.RawMessage
 					if err := json.Unmarshal([]byte(tc.body), &sent); err != nil {

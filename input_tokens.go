@@ -110,6 +110,9 @@ func handleInputTokens(
 		writeError(w, asAPIError(err))
 		return
 	}
+	// The builders copy allowlisted fields only. This guard holds if the
+	// allowlist ever grows.
+	stripVLLMInternalFields(tokenizeBody)
 
 	tokenizeBytes, err := json.Marshal(tokenizeBody)
 	if err != nil {

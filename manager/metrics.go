@@ -76,12 +76,19 @@ func (q queueMarks) overloaded(waiting float64, previous bool) bool {
 	return previous && waiting > float64(q.clear)
 }
 
-func newEnclaveMetrics(host, model string) *enclaveMetrics {
+// newEnclaveMetrics scrapes through the attested transport that inference
+// uses, pinned to the enclave's verified TLS key, so the metrics credential
+// reaches only the attested backend. A key change installs a new Enclave and
+// with it a new poller. Redirects are not followed: a scrape never needs one,
+// and the credential must not be replayed elsewhere.
+func newEnclaveMetrics(host, model, tlsKeyFP string, attestation *attestationState) *enclaveMetrics {
 	return &enclaveMetrics{
 		host:  host,
 		model: model,
 		client: &http.Client{
-			Timeout: 5 * time.Second,
+			Timeout:       5 * time.Second,
+			Transport:     newAttestedTransport(tlsKeyFP, attestation),
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 		},
 	}
 }
@@ -242,6 +249,9 @@ func (m *enclaveMetrics) shutdown() {
 			"enclave": m.host,
 		}).Info("stopped vLLM metrics polling")
 	}
+	// Each poller owns a pinned connection pool; a retired one must not hold
+	// its idle connection until the idle timeout.
+	m.client.CloseIdleConnections()
 }
 
 func extractRequestCounts(r io.Reader) (requestCounts, error) {

@@ -375,7 +375,7 @@ func (em *EnclaveManager) refreshEnclave(modelName, host string) (err error) {
 		hpkeKey:     hpkeKey,
 		proxy:       proxy,
 		attestation: state,
-		metrics:     newEnclaveMetrics(host, modelName),
+		metrics:     newEnclaveMetrics(host, modelName, tlsKey, state),
 		cb:          cb,
 		pricing:     em.ModelPricing,
 	})
