@@ -34,6 +34,7 @@ containers:
     secrets:
       - USAGE_REPORTER_SECRET
       - USAGE_CONTEXT_SECRET
+      - CACHE_ROUTE_SECRET
       - GLM_BACKEND_API_KEY
       - KIMI_BACKEND_API_KEY
       - METRICS_API_KEY

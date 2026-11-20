@@ -13,7 +13,7 @@ import (
 const vllmInternalFieldsJSON = `"kv_transfer_params":{"prompt_token_ids":[1,2,3]},"ec_transfer_params":{"do_remote_encode":true},"vllm_xargs":{"session_id":"other-session"}`
 
 func TestStripVLLMInternalFields(t *testing.T) {
-	body, err := decodeJSONBody([]byte(`{"model":"m",` + vllmInternalFieldsJSON + `,"vllm_other":1}`))
+	body, err := decodeJSONBody([]byte(`{"model":"m","session_id":"client-session","request_id":"public-invoice-id",` + vllmInternalFieldsJSON + `,"vllm_other":1}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -22,6 +22,9 @@ func TestStripVLLMInternalFields(t *testing.T) {
 		if _, ok := body[field]; ok {
 			t.Fatalf("%s survived", field)
 		}
+	}
+	if body["request_id"] != "public-invoice-id" {
+		t.Fatal("public invoice request ID changed without a migration")
 	}
 	if body["model"] != "m" || body["vllm_other"] == nil {
 		t.Fatalf("unrelated fields changed: %v", body)

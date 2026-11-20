@@ -129,6 +129,16 @@ var (
 		},
 	)
 
+	// SecretInfo identifies the configured routing secret without exposing it.
+	// Operators compare this low-cardinality ID across router replicas.
+	SecretInfo = promauto.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "router_cache_route_secret_info",
+			Help: "Constant 1, labeled with a short non-secret identifier for the cache-routing secret",
+		},
+		[]string{"key_id"},
+	)
+
 	// PoolInfo pins each model's configured replica-set view. Router
 	// instances that disagree on pool_hash compute different HRW rankings
 	// for the same key.
@@ -160,18 +170,43 @@ var (
 	)
 )
 
-// poolInfoDomainTag namespaces the pool_hash derivation; no tag in the
-// router may be a prefix of another.
-const poolInfoDomainTag = "tinfoil/route-pool/v1"
+// These domain tags separate secret and replica-set identifiers from routing
+// keys. No tag in the router may be a prefix of another.
+const (
+	secretInfoDomainTag = "tinfoil/route-secret-id/v1"
+	poolInfoDomainTag   = "tinfoil/route-pool/v1"
+)
 
 // infoMu guards the last-published info labels so a change replaces the old
 // series instead of leaving a stale one beside it.
 var (
 	infoMu       sync.Mutex
+	lastSecretID string
 	lastPoolHash = map[string]string{}
 	lastMode     = map[string]Mode{}
 	lastRawMode  = map[string]string{}
 )
+
+func secretIdentifier(secret string) string {
+	if secret == "" {
+		return ""
+	}
+	sum := cachesalt.Sum(secretInfoDomainTag, secret)
+	return hex.EncodeToString(sum[:8])
+}
+
+func setSecretInfo(secret string) {
+	id := secretIdentifier(secret)
+	infoMu.Lock()
+	defer infoMu.Unlock()
+	if lastSecretID != "" && lastSecretID != id {
+		SecretInfo.DeleteLabelValues(lastSecretID)
+	}
+	lastSecretID = id
+	if id != "" {
+		SecretInfo.WithLabelValues(id).Set(1)
+	}
+}
 
 // SetPoolInfo publishes the pool_info series for a model from its configured
 // enclave hostnames (order-insensitive). Empty hostnames delete the series.

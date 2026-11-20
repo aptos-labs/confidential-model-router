@@ -5,21 +5,39 @@ import (
 	"strings"
 )
 
-// vllmHeaderPrefix marks request headers that vLLM reads as engine controls.
-// vLLM v0.31.0 takes X-Vllm-Priority over the body's priority field, so a
-// client value would undo the router's priority injection and rate-limit
-// demotion. The router owns these controls: no X-Vllm-* header reaches a
-// backend, whichever code path built the request.
+// The router owns vLLM's engine and request-routing controls. In particular,
+// X-Vllm-Priority would undo the router's priority injection, and the other
+// names select load reporting, sticky sessions, data-parallel ranks, or
+// tracing. Match case-insensitively because direct map writes need not use
+// canonical names, and delete every value for each matching name.
 const vllmHeaderPrefix = "X-Vllm-"
 
-func isVLLMHeader(name string) bool {
-	return len(name) >= len(vllmHeaderPrefix) && strings.EqualFold(name[:len(vllmHeaderPrefix)], vllmHeaderPrefix)
+// X-Request-Id and body request_id deliberately stay unchanged. Existing
+// public invoices use the echoed ID. Changing that ownership needs a migration.
+var vllmControlHeaders = []string{
+	"Endpoint-Load-Metrics-Format",
+	"X-Session-ID",
+	"X-Data-Parallel-Rank",
+	"Traceparent",
+	"Tracestate",
 }
 
-// withoutVLLMHeaders returns req itself when it carries no X-Vllm-* header,
-// else a clone without them; a RoundTripper must not mutate its request. The
-// match ignores case because a header map written directly need not hold
-// canonical names.
+const vllmLoadResponseHeader = "Endpoint-Load-Metrics"
+
+func isVLLMHeader(name string) bool {
+	if len(name) >= len(vllmHeaderPrefix) && strings.EqualFold(name[:len(vllmHeaderPrefix)], vllmHeaderPrefix) {
+		return true
+	}
+	for _, blocked := range vllmControlHeaders {
+		if strings.EqualFold(name, blocked) {
+			return true
+		}
+	}
+	return false
+}
+
+// withoutVLLMHeaders returns req itself when it carries no engine-control
+// header, else a clone without them; a RoundTripper must not mutate its request.
 func withoutVLLMHeaders(req *http.Request) *http.Request {
 	found := false
 	for name := range req.Header {
@@ -38,4 +56,16 @@ func withoutVLLMHeaders(req *http.Request) *http.Request {
 		}
 	}
 	return out
+}
+
+// vLLM emits this load report on non-streaming responses. No authenticated
+// internal hop consumes response load headers today, so remove every value at
+// the transport boundary before either the public proxy or a tool client sees it.
+// X-Request-Id remains intact for the existing public invoice behavior.
+func withoutVLLMLoadHeaders(resp *http.Response) {
+	for name := range resp.Header {
+		if strings.EqualFold(name, vllmLoadResponseHeader) {
+			delete(resp.Header, name)
+		}
+	}
 }

@@ -53,8 +53,8 @@ func TestLocalInflightSpillsBurstInsidePollInterval(t *testing.T) {
 	} else {
 		selected.ReleaseDispatch()
 	}
-	if tier, _ := m.Enclaves["warm"].metrics.tier(policy, runningRequestLimit); tier != tierBusy {
-		t.Fatalf("at-cap local in-flight with idle sample tier=%v, want %v", tier, tierBusy)
+	if tier, _ := m.Enclaves["warm"].metrics.tier(policy, runningRequestLimit); tier != tierOverloaded {
+		t.Fatalf("at-cap local in-flight with idle sample tier=%v, want %v", tier, tierOverloaded)
 	}
 }
 
@@ -185,6 +185,65 @@ func TestTieredSelection(t *testing.T) {
 	}
 }
 
+func TestLocalInflightCapSurvivesStaleMetricsBurst(t *testing.T) {
+	const cap = 2
+	m := newTestModel("warm", "sibling")
+	policy := &config.OverloadConfig{MaxRequestsWaiting: cap}
+	m.Overload = policy
+	for host, enclave := range m.Enclaves {
+		enclave.metrics = newTestMetrics(host, policy)
+		enclave.metrics.updateLatest(requestCounts{hasWaiting: true}, time.Now().Add(-sampleStalenessLimit-time.Second))
+	}
+	order := []string{"warm", "sibling"}
+	var reserved []*Enclave
+	defer func() {
+		for _, enclave := range reserved {
+			enclave.ReleaseDispatch()
+		}
+	}()
+	for i := 0; i < 2*cap; i++ {
+		selected, _, reject, _, _ := m.SelectServing(order, true, nil, nil, policy)
+		if selected == nil || reject {
+			t.Fatalf("selection %d rejected below the fleet-wide local capacity", i+1)
+		}
+		reserved = append(reserved, selected)
+		wantHost := "warm"
+		if i >= cap {
+			wantHost = "sibling"
+		}
+		if selected.host != wantHost {
+			t.Fatalf("selection %d used %s, want %s after local cap", i+1, selected.host, wantHost)
+		}
+	}
+	selected, _, reject, retry, _ := m.SelectServing(order, true, nil, nil, policy)
+	if selected == nil || !reject || retry != time.Minute {
+		t.Fatalf("burst above every stale replica's local cap: selected=%v reject=%v retry=%v", selected, reject, retry)
+	}
+	reserved = append(reserved, selected)
+}
+
+func TestSelectServingWithCapDistinguishesPolledOverload(t *testing.T) {
+	const cap = 1
+	m := newTestModel("warm")
+	policy := &config.OverloadConfig{MaxRequestsWaiting: cap}
+	m.Overload = policy
+	enclave := m.Enclaves["warm"]
+	enclave.metrics = newTestMetrics(enclave.host, policy)
+	enclave.metrics.updateLatest(requestCounts{waiting: cap, hasWaiting: true}, time.Now())
+	selected, _, overloaded, _, _, localCap := m.SelectServingWithCap(nil, true, nil, nil, policy)
+	if selected == nil || !overloaded || localCap {
+		t.Fatalf("polled overload was treated as local cap: selected=%v overloaded=%v localCap=%v", selected, overloaded, localCap)
+	}
+	selected.ReleaseDispatch()
+	enclave.inflight.Store(cap)
+	selected, _, overloaded, _, _, localCap = m.SelectServingWithCap(nil, true, nil, nil, policy)
+	if selected == nil || !overloaded || !localCap {
+		t.Fatalf("full local cap was not distinguished: selected=%v overloaded=%v localCap=%v", selected, overloaded, localCap)
+	}
+	selected.ReleaseDispatch()
+	enclave.inflight.Store(0)
+}
+
 func TestWaitingOnlyPolicyUsesTierOrder(t *testing.T) {
 	const queueLimit = 3
 	m := newTieredTestModel()
@@ -292,6 +351,7 @@ func TestConcurrentSelectionsReserveLocalLoad(t *testing.T) {
 	// spillover (see TestLocalInflightSpillsBurstInsidePollInterval), so
 	// keep every tier preferred for the whole burst.
 	policy.SoftMaxRequestsRunning = requests
+	policy.MaxRequestsWaiting = requests
 	start := make(chan struct{})
 	results := make(chan *Enclave, requests)
 	for range requests {

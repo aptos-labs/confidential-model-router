@@ -256,6 +256,26 @@ func TestOverloadRunningConfig(t *testing.T) {
 	}
 }
 
+func TestLocalInflightCapUsesQueueBudget(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		cfg  *OverloadConfig
+		want int
+	}{
+		{name: "omitted"},
+		{name: "disabled", cfg: &OverloadConfig{}},
+		{name: "soft preference only", cfg: &OverloadConfig{SoftMaxRequestsRunning: 4}},
+		{name: "queue limit", cfg: &OverloadConfig{MaxRequestsWaiting: 20}, want: 20},
+		{name: "queue and soft limits", cfg: &OverloadConfig{MaxRequestsWaiting: 20, SoftMaxRequestsRunning: 4}, want: 20},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.cfg.LocalInflightCap(); got != tc.want {
+				t.Fatalf("LocalInflightCap() = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestReservationConfigRejectsInvalidPools(t *testing.T) {
 	for _, tc := range []struct {
 		name, reservations, wantErr string

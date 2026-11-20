@@ -592,6 +592,13 @@ func (e *Enclave) breakerClosed() bool {
 	return e.cb == nil || e.cb.Closed()
 }
 
+// LocalInflightCapReached reports whether this router has reserved the
+// enclave's absolute local capacity. It does not depend on backend metrics.
+func (e *Enclave) LocalInflightCapReached(policy *config.OverloadConfig) bool {
+	cap := policy.LocalInflightCap()
+	return cap > 0 && e.inflight.Load() >= int64(cap)
+}
+
 // ReleaseDispatch releases one SelectServing reservation after rejection,
 // dispatch failure, or response completion. Each selection must release once.
 func (e *Enclave) ReleaseDispatch() {
@@ -691,6 +698,9 @@ func NewEnclaveManager(configFile []byte, controlPlaneURL string, usageReporterI
 		return nil, err
 	}
 
+	if err := cacheroute.ValidateSecret(cfg); err != nil {
+		return nil, err
+	}
 	if err := applyBackendPins(cfg); err != nil {
 		return nil, err
 	}
@@ -760,6 +770,9 @@ func (em *EnclaveManager) sync() error {
 	ctx, cancel := context.WithTimeout(context.Background(), runtimeConfigTimeout)
 	defer cancel()
 	config, configErr := config.LoadContext(ctx, em.updateConfigURL, false)
+	if configErr == nil {
+		configErr = cacheroute.ValidateSecret(config)
+	}
 	if configErr == nil {
 		em.refreshModelMetadata()
 		if len(config.HardwareMeasurements) > 0 && !sameReleaseList(em.hardwarePins, config.HardwareMeasurements) {

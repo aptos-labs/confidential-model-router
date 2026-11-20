@@ -27,7 +27,11 @@ func TestMetricContract(t *testing.T) {
 	s.Observe(model, nil, pool2(), "enclave-a", cfg) // recovered panic
 	SetPoolInfo(model, []string{"enclave-a", "enclave-b"})
 	SetMode(model, nil)
-	t.Cleanup(func() { DropModel(model) })
+	SetSecret("contract-routing-secret")
+	t.Cleanup(func() {
+		DropModel(model)
+		SetSecret("")
+	})
 
 	// Materialize zero-valued children for counters whose samples depend
 	// on traffic specifics (an eviction happening, a pick agreeing with
@@ -48,6 +52,7 @@ func TestMetricContract(t *testing.T) {
 		"router_cache_route_key_rpm":                  {"model"},
 		"router_cache_route_key_evictions_total":      {"model", "reason"},
 		"router_cache_route_compute_seconds":          {},
+		"router_cache_route_secret_info":              {"key_id"},
 		"router_cache_route_pool_info":                {"model", "pool_hash"},
 		"router_cache_route_mode":                     {"model", "mode"},
 		"router_cache_route_tracked_keys":             {"model", "enclave", "r"},

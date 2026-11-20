@@ -44,27 +44,21 @@ func (m *enclaveMetrics) tier(policy *config.OverloadConfig, localInflight int64
 		return tierPreferred, 0
 	}
 	counts := m.latestCounts
+	unknown := m.latestCollected.IsZero() || time.Since(m.latestCollected) > sampleStalenessLimit ||
+		!counts.supports(policy)
+	if cap := policy.LocalInflightCap(); cap > 0 && localInflight >= int64(cap) {
+		return tierOverloaded, counts.waiting
+	}
+	if unknown && policy.SoftMaxRequestsRunning > 0 && localInflight >= int64(policy.SoftMaxRequestsRunning) {
+		// Preserve the existing unknown-sample spill at the soft limit.
+		return tierOverloaded, counts.waiting
+	}
+	if unknown {
+		return tierUnknown, counts.waiting
+	}
 	// Queued requests count toward the soft max: a host queueing below it
 	// is admitting work, not saturated.
 	load := max(counts.running+counts.waiting, float64(localInflight))
-	if policy.SoftMaxRequestsRunning > 0 {
-		// An at-cap local count outranks a missing sample: without this,
-		// dead polling pins every caller to its first pool, inert to
-		// soft_max, because unknown competes with unknown on pool order.
-		// Overloaded (not busy) so unknown spill candidates win; when
-		// every usable pool is at its local cap with no samples, the
-		// usual tier-2 503 applies instead of unbounded queueing.
-		if localInflight >= int64(policy.SoftMaxRequestsRunning) {
-			if m.latestCollected.IsZero() || time.Since(m.latestCollected) > sampleStalenessLimit ||
-				!counts.supports(policy) {
-				return tierOverloaded, counts.waiting
-			}
-		}
-	}
-	if m.latestCollected.IsZero() || time.Since(m.latestCollected) > sampleStalenessLimit ||
-		!counts.supports(policy) {
-		return tierUnknown, counts.waiting
-	}
 	trip, clear := policy.Marks()
 	marks := queueMarks{trip, clear}
 	if trip > 0 && marks.overloaded(counts.waiting, m.queueOverloads[marks]) {
@@ -85,21 +79,29 @@ func (m *enclaveMetrics) tier(policy *config.OverloadConfig, localInflight int64
 // recovery probes and the all-breakers-open last resort retain their bypass.
 // A non-nil enclave reserves one local in-flight request until ReleaseDispatch.
 func (m *Model) SelectServing(order []string, claimProbes bool, primary, spill map[string]bool, policy *config.OverloadConfig) (*Enclave, *ProbeClaim, bool, time.Duration, float64) {
+	enclave, claim, overloaded, retryAfter, waiting, _ := m.SelectServingWithCap(order, claimProbes, primary, spill, policy)
+	return enclave, claim, overloaded, retryAfter, waiting
+}
+
+// SelectServingWithCap also reports whether selection hit the absolute local
+// cap before it reserved the rejection. Callers can preserve priority bypass
+// for polled queue overload without bypassing the local cap.
+func (m *Model) SelectServingWithCap(order []string, claimProbes bool, primary, spill map[string]bool, policy *config.OverloadConfig) (*Enclave, *ProbeClaim, bool, time.Duration, float64, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	enclave, claim, overloaded, retryAfter, waiting := m.selectServingLocked(order, claimProbes, primary, spill, policy, "")
+	enclave, claim, overloaded, retryAfter, waiting, localCapReached := m.selectServingLocked(order, claimProbes, primary, spill, policy, "")
 	if enclave != nil {
 		enclave.inflight.Add(1)
 		BackendInflight.WithLabelValues(enclave.modelName, enclave.host).Inc()
 	}
-	return enclave, claim, overloaded, retryAfter, waiting
+	return enclave, claim, overloaded, retryAfter, waiting, localCapReached
 }
 
 // SelectRetry excludes recovery probes, unknown load, and overloaded replicas.
 func (m *Model) SelectRetry(failedHost string, order []string, primary, spill map[string]bool, policy *config.OverloadConfig) *Enclave {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	enclave, _, overloaded, _, _ := m.selectServingLocked(order, false, primary, spill, policy, failedHost)
+	enclave, _, overloaded, _, _, _ := m.selectServingLocked(order, false, primary, spill, policy, failedHost)
 	if enclave == nil || overloaded {
 		return nil
 	}
@@ -108,7 +110,7 @@ func (m *Model) SelectRetry(failedHost string, order []string, primary, spill ma
 	return enclave
 }
 
-func (m *Model) selectServingLocked(order []string, claimProbes bool, primary, spill map[string]bool, policy *config.OverloadConfig, excludedHost string) (*Enclave, *ProbeClaim, bool, time.Duration, float64) {
+func (m *Model) selectServingLocked(order []string, claimProbes bool, primary, spill map[string]bool, policy *config.OverloadConfig, excludedHost string) (*Enclave, *ProbeClaim, bool, time.Duration, float64, bool) {
 	pools := []map[string]bool{primary}
 	if len(spill) > 0 {
 		pools = append(pools, spill)
@@ -134,6 +136,9 @@ func (m *Model) selectServingLocked(order []string, claimProbes bool, primary, s
 			if enclave.metrics != nil {
 				tier, waiting[enclave] = enclave.metrics.tier(policy, enclave.inflight.Load())
 			}
+			if enclave.LocalInflightCapReached(policy) {
+				tier = tierOverloaded
+			}
 			if excludedHost != "" && tier == tierUnknown {
 				continue
 			}
@@ -145,7 +150,7 @@ func (m *Model) selectServingLocked(order []string, claimProbes bool, primary, s
 			if routingTier(tier) == tierPreferred && claimProbes {
 				for _, enclave := range probes[pool] {
 					if claim := enclave.claimProbe(); claim != nil {
-						return enclave, claim, false, 0, 0
+						return enclave, claim, false, 0, 0, false
 					}
 				}
 			}
@@ -154,18 +159,18 @@ func (m *Model) selectServingLocked(order []string, claimProbes bool, primary, s
 			}
 			enclave := m.pickTierLocked(order, candidates)
 			if routingTier(tier) == tierOverloaded {
-				return enclave, nil, true, policy.RetryAfter(), waiting[enclave]
+				return enclave, nil, true, policy.RetryAfter(), waiting[enclave], enclave.LocalInflightCapReached(policy)
 			}
 			if routingTier(tier) == tierUnknown {
 				OverloadFailOpenTotal.WithLabelValues(enclave.modelName, enclave.host).Inc()
 			}
-			return enclave, nil, false, 0, waiting[enclave]
+			return enclave, nil, false, 0, waiting[enclave], false
 		}
 	}
 	if len(degraded) > 0 {
-		return degraded[0], nil, false, 0, 0
+		return degraded[0], nil, false, 0, 0, false
 	}
-	return nil, nil, false, 0, 0
+	return nil, nil, false, 0, 0, false
 }
 
 func (m *Model) pickTierLocked(order []string, candidates []*Enclave) *Enclave {

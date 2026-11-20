@@ -361,6 +361,45 @@ func TestSettingsFromSecret(t *testing.T) {
 	}
 }
 
+func TestValidateSecret(t *testing.T) {
+	SetSecret("")
+	t.Cleanup(func() { SetSecret("") })
+	enforced := &config.Config{Models: map[string]config.Model{
+		"cache-enforced": {CacheRoute: &config.CacheRouteConfig{Mode: "enforced"}},
+	}}
+	if err := ValidateSecret(enforced); err == nil || !strings.Contains(err.Error(), "CACHE_ROUTE_SECRET") {
+		t.Fatalf("missing secret error = %v", err)
+	}
+	SetSecret(strings.Repeat("x", 32))
+	if err := ValidateSecret(enforced); err != nil {
+		t.Fatalf("configured secret rejected: %v", err)
+	}
+	SetSecret("")
+	for _, mode := range []string{"", "off", "shadow", "unknown"} {
+		cfg := &config.Config{Models: map[string]config.Model{
+			"not-enforced": {CacheRoute: &config.CacheRouteConfig{Mode: mode}},
+		}}
+		if err := ValidateSecret(cfg); err != nil {
+			t.Errorf("mode %q required a secret: %v", mode, err)
+		}
+	}
+}
+
+func TestSecretIdentifierChecksReplicaConsistency(t *testing.T) {
+	first := strings.Repeat("a", 32)
+	second := strings.Repeat("b", 32)
+	firstID := secretIdentifier(first)
+	if firstID == "" || len(firstID) != 16 || strings.Contains(firstID, first) || firstID != secretIdentifier(first) {
+		t.Fatalf("invalid non-secret identifier %q", firstID)
+	}
+	if firstID == secretIdentifier(second) {
+		t.Fatal("different cache secrets have the same identifier")
+	}
+	if secretIdentifier("") != "" {
+		t.Fatal("missing secret produced an identifier")
+	}
+}
+
 func TestSettingsFrom(t *testing.T) {
 	def := SettingsFrom(nil)
 	if def.Mode != ModeOff || def.Retention != DefaultRetention || def.MinPromptBytes != DefaultMinPromptBytes || def.SplitThresholdRPM != DefaultSplitThresholdRPM {

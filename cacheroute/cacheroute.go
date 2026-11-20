@@ -11,6 +11,7 @@
 package cacheroute
 
 import (
+	"fmt"
 	"slices"
 	"strconv"
 	"sync/atomic"
@@ -36,6 +37,21 @@ var keySecret atomic.Value // string
 // changing it re-homes every key.
 func SetSecret(secret string) {
 	keySecret.Store(secret)
+	setSecretInfo(secret)
+}
+
+// ValidateSecret refuses to enable deterministic cross-request routing without
+// keying material. Call it before accepting both initial and refreshed config.
+func ValidateSecret(cfg *config.Config) error {
+	if currentSecret() != "" {
+		return nil
+	}
+	for name, model := range cfg.Models {
+		if model.CacheRoute != nil && resolveMode(model.CacheRoute.Mode) == ModeEnforced {
+			return fmt.Errorf("model %q: CACHE_ROUTE_SECRET is required when cache routing is enforced", name)
+		}
+	}
+	return nil
 }
 
 // currentSecret returns the installed routing secret, "" when none.
