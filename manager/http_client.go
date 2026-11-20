@@ -40,9 +40,13 @@ func (em *EnclaveManager) boundHTTPClientPreferring(ctx context.Context, modelNa
 	}
 
 	primary, spill, policy := model.ReservationPools(CallerFromContext(ctx))
-	enclave, claim, _, _, _ := model.SelectServing(order, claimProbes, primary, spill, policy)
+	enclave, claim, overloaded, _, _, localCapReached := model.SelectServingWithCap(order, claimProbes, primary, spill, policy)
 	if enclave == nil {
 		return nil, nil, nil, fmt.Errorf("model %s has no available enclave", modelName)
+	}
+	if overloaded && localCapReached {
+		enclave.ReleaseDispatch()
+		return nil, nil, nil, fmt.Errorf("model %s local in-flight cap reached", modelName)
 	}
 
 	// No client-level Timeout: it would cover the entire exchange including

@@ -177,6 +177,16 @@ func TestCacheRouteRequest(t *testing.T) {
 	}
 }
 
+func TestNewEnclaveManagerRequiresSecretForEnforcedCacheRouting(t *testing.T) {
+	cacheroute.SetSecret("")
+	t.Cleanup(func() { cacheroute.SetSecret("") })
+	body := []byte("models:\n  cached:\n    enclaves: [cache.example]\n    cache_route: {mode: enforced}\n")
+	_, err := NewEnclaveManager(body, "https://control.example", "", "", "", "", "", time.Minute, false)
+	if err == nil || !strings.Contains(err.Error(), "CACHE_ROUTE_SECRET") {
+		t.Fatalf("startup error = %v, want missing CACHE_ROUTE_SECRET", err)
+	}
+}
+
 func TestCacheRouteSettings(t *testing.T) {
 	m := newTestModel("a", "b")
 	if s := m.CacheRouteSettings(); s.Mode != cacheroute.ModeOff {

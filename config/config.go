@@ -86,6 +86,18 @@ func (c *OverloadConfig) Enabled() bool {
 	return c != nil && (c.MaxRequestsWaiting > 0 || c.SoftMaxRequestsRunning > 0)
 }
 
+// LocalInflightCap is the absolute per-router admission limit for one enclave.
+// The backend waiting limit already bounds each deployment's queue budget and
+// remains in effect during runtime config reloads.
+// Unlike the polled queue, local in-flight load stays usable when scrapes fail.
+// With N router replicas, at most N times this many dispatches can be in flight.
+func (c *OverloadConfig) LocalInflightCap() int {
+	if c == nil || c.MaxRequestsWaiting <= 0 {
+		return 0
+	}
+	return c.MaxRequestsWaiting
+}
+
 // Marks returns the overload trip and clear thresholds. When
 // ClearRequestsWaiting is zero (omitted) or out of range (it must sit below
 // the trip mark), the clear mark defaults to half the trip mark. Only

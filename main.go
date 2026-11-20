@@ -1121,8 +1121,8 @@ func newRouterHandler(em *manager.EnclaveManager, routeContextClient *routeConte
 			}
 		}
 
-		enclave, probeClaim, overloaded, retryAfter, waiting := model.SelectServing(cacheRouteOrder, true, poolPrimary, poolSpill, overloadPolicy)
-		if hasConfiguredPriority && overloaded {
+		enclave, probeClaim, overloaded, retryAfter, waiting, localCapReached := model.SelectServingWithCap(cacheRouteOrder, true, poolPrimary, poolSpill, overloadPolicy)
+		if hasConfiguredPriority && overloaded && !localCapReached {
 			manager.PriorityOverloadAdmitsTotal.WithLabelValues(modelName).Inc()
 			overloaded = false
 		}

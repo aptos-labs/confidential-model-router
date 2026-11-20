@@ -15,7 +15,18 @@ import (
 func clientVLLMHeaders(h http.Header) {
 	h.Set("X-Vllm-Priority", "-100")
 	h["x-vllm-custom"] = []string{"1"}
+	h.Set("Endpoint-Load-Metrics-Format", "JSON")
+	h["endpoint-load-metrics-format"] = []string{"TEXT", "JSON"}
+	h.Set("X-Session-ID", "first-session")
+	h["x-session-id"] = []string{"second-session", "third-session"}
+	h.Set("X-Data-Parallel-Rank", "1")
+	h["x-data-parallel-rank"] = []string{"2", "3"}
+	h.Set("Traceparent", "00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01")
+	h["traceparent"] = []string{"00-cccccccccccccccccccccccccccccccc-dddddddddddddddd-01"}
+	h.Set("Tracestate", "first=value")
+	h["tracestate"] = []string{"second=value"}
 	h.Set("X-Keep-Me", "kept")
+	h.Set("X-Request-Id", "public-invoice-id")
 }
 
 func assertNoVLLMHeaders(t *testing.T, got http.Header) {
@@ -27,6 +38,9 @@ func assertNoVLLMHeaders(t *testing.T, got http.Header) {
 	}
 	if got.Get("X-Keep-Me") != "kept" {
 		t.Fatal("unrelated client header dropped")
+	}
+	if got.Get("X-Request-Id") != "public-invoice-id" {
+		t.Fatal("public invoice request ID header changed without a migration")
 	}
 }
 
@@ -88,6 +102,41 @@ func TestVLLMHeadersNeverReachBackend(t *testing.T) {
 				t.Fatal("caller headers mutated")
 			}
 		})
+	}
+}
+
+func TestVLLMLoadHeadersNeverReachNonStreamingClient(t *testing.T) {
+	upstream := newBackendTLSServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header()["Endpoint-Load-Metrics"] = []string{"TEXT named_metrics.num_requests_waiting=7"}
+		w.Header()["endpoint-load-metrics"] = []string{"JSON duplicate"}
+		w.Header().Set("X-Request-Id", "public-invoice-id")
+		w.Header().Set("X-Keep-Me", "kept")
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"id":"test","choices":[]}`)
+	}))
+	defer upstream.Close()
+	trustBackendTLSFixture(t, upstream)
+	host := strings.TrimPrefix(upstream.URL, "https://")
+	fp := testBackendFingerprint(t, upstream)
+	e := &Enclave{host: host, modelName: "other", tlsKeyFP: fp, cb: newCircuitBreaker()}
+	e.proxy = newProxy(host, fp, "other", nil, e.cb, nil)
+	r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader("{}"))
+	w := httptest.NewRecorder()
+	e.ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", w.Code, w.Body.String())
+	}
+	if got := w.Result().Header.Values(vllmLoadResponseHeader); len(got) != 0 {
+		t.Fatalf("client received engine load headers: %v", got)
+	}
+	if got := w.Header().Get("X-Request-Id"); got != "public-invoice-id" {
+		t.Fatalf("public request ID changed: %q", got)
+	}
+	if got := w.Header().Get("X-Keep-Me"); got != "kept" {
+		t.Fatal("unrelated response header dropped")
+	}
+	if got := strings.TrimSpace(w.Body.String()); got != `{"id":"test","choices":[]}` {
+		t.Fatalf("non-streaming body changed: %s", got)
 	}
 }
 

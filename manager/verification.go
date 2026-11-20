@@ -88,5 +88,9 @@ func (t *attestedTransport) RoundTrip(req *http.Request) (*http.Response, error)
 		}
 		return nil, &enclave.AttestationError{Err: errAttestationExpired}
 	}
-	return t.TLSBoundRoundTripper.RoundTrip(withoutVLLMHeaders(req))
+	resp, err := t.TLSBoundRoundTripper.RoundTrip(withoutVLLMHeaders(req))
+	if resp != nil {
+		withoutVLLMLoadHeaders(resp)
+	}
+	return resp, err
 }

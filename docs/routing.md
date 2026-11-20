@@ -46,14 +46,19 @@ respect the affinity cap. Running tiers combine the sampled count with this
 router's own in-flight dispatches, so a burst that lands inside one poll
 interval still sees the reserved host reach its running limit and spill.
 The combined signal is per router, so with N replicas the instantaneous
-cap is N × the running limit until the sampled count corrects it; sampled
-running limits are not global concurrency caps.
+soft limit is N × the running limit until the sampled count corrects it;
+sampled running limits are not global concurrency caps.
+`max_requests_waiting` also sets an absolute local in-flight cap for each
+enclave. This cap does not depend on metrics. Selection spills to another
+eligible pool before rejecting at the cap. Configured priority and internal
+dispatches retain their queue-overload bypass, but not their local-cap bypass.
+With N router replicas, the local caps admit at most N × the configured limit.
 Missing/incomplete samples or samples older than 15 seconds are unknown:
-known tiers 0 and 1 win first, then unknown load fails open. An at-cap
-local in-flight count still ranks busy on unknown samples, so a pool whose
-polling has died spills instead of pinning callers to its first pool.
-Expired attestations are excluded; circuit-breaker recovery probes and the
-all-breakers-open fallback retain their load-guard bypass.
+known tiers 0 and 1 win first, then unknown load fails open below the local
+cap. At the soft limit, local in-flight load still spills on unknown samples,
+so a pool whose polling has died does not pin callers to its first pool.
+Expired attestations are excluded; circuit-breaker recovery probes and
+the all-breakers-open fallback retain their load-guard bypass.
 
 `router_reserved_pool_serves_total{pool="spilled"}` counts spillover.
 Backend overload gauges describe the host's own policy, not every caller's tier.

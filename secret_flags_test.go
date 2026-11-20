@@ -7,6 +7,11 @@ import (
 	"os/exec"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v2"
+
+	"github.com/tinfoilsh/confidential-model-router/cacheroute"
+	"github.com/tinfoilsh/confidential-model-router/config"
 )
 
 // secretEnvFlags maps each secret flag to the env var it falls back to.
@@ -44,6 +49,51 @@ func TestSecretFlagDefaultsOmitEnv(t *testing.T) {
 	}
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("child: %v\n%s", err, strings.ReplaceAll(string(out), secretFlagCanary, "<canary>"))
+	}
+}
+
+func TestReleaseConfigSecurityRequirements(t *testing.T) {
+	cfg, err := config.FromBytes(configFile)
+	if err != nil {
+		t.Fatalf("embedded config is invalid: %v", err)
+	}
+	cacheroute.SetSecret(strings.Repeat("x", 32))
+	t.Cleanup(func() { cacheroute.SetSecret("") })
+	if err := cacheroute.ValidateSecret(cfg); err != nil {
+		t.Fatalf("embedded cache routing config is invalid: %v", err)
+	}
+	for name, model := range cfg.Models {
+		if model.Overload.Enabled() && model.Overload.LocalInflightCap() <= 0 {
+			t.Errorf("model %s has overload routing without a local in-flight cap", name)
+		}
+	}
+
+	manifestBytes, err := os.ReadFile("tinfoil-config.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var manifest struct {
+		Containers []struct {
+			Name    string   `yaml:"name"`
+			Secrets []string `yaml:"secrets"`
+		} `yaml:"containers"`
+	}
+	if err := yaml.Unmarshal(manifestBytes, &manifest); err != nil {
+		t.Fatalf("release manifest is invalid: %v", err)
+	}
+	found := false
+	for _, container := range manifest.Containers {
+		if container.Name != "router" {
+			continue
+		}
+		for _, secret := range container.Secrets {
+			if secret == "CACHE_ROUTE_SECRET" {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Fatal("router release manifest does not declare CACHE_ROUTE_SECRET")
 	}
 }
 
